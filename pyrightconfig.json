@@ -1,0 +1,9 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": ["services/control-plane", "packages"],
+  "include": ["services", "packages", "tests"],
+  "exclude": ["**/node_modules", "**/__pycache__", ".venv", "apps/web"],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning"
+}

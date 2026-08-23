@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sandman-postgres
+    environment:
+      POSTGRES_USER: sandman
+      POSTGRES_PASSWORD: sandman
+      POSTGRES_DB: sandman
+    ports:
+      # 5433 on the host so we never collide with a local Postgres on 5432.
+      - "5433:5432"
+    volumes:
+      - sandman-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sandman -d sandman"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  sandman-pgdata:

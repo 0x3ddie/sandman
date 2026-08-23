@@ -1,0 +1,65 @@
+[project]
+name = "sandman"
+version = "0.1.0"
+description = "Pen-tests your rollout before it ships: differential fan-out probing across three sandbox variants, with autonomous hotfix remediation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "modal>=1.5.0",
+    "openai>=1.60",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.14",
+    "typer>=0.15",
+    "rich>=13.9",
+    "python-dotenv>=1.0",
+    "sse-starlette>=2.1",
+    "cryptography>=44.0",
+    "stripe>=11.4",
+    "pyjwt[crypto]>=2.10",
+]
+
+[project.scripts]
+sandman = "sandman.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "respx>=0.21",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["services/control-plane/sandman"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["services/control-plane", "packages"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["services/control-plane", "packages"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "services/control-plane:packages"
+ignore_missing_imports = true
