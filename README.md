@@ -75,7 +75,9 @@ The remediation flow turns sanitized incident evidence into a bounded candidate 
    before Sandman permits a draft pull request.
 
 Generation and publication are deliberately separate. Codex cannot push a branch, and
-the GitHub token is only provided to the narrowly scoped publication step.
+the GitHub token is only provided to the narrowly scoped publication step. The dashboard
+shows Codex's test report, changed files, and complete patch before enabling the explicit
+publish and verification actions. Artifacts with a reported failing test cannot be published.
 
 ## Pull requests and Greptile
 

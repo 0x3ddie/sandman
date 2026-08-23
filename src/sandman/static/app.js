@@ -235,9 +235,15 @@ function renderHotfix(record) {
   document.querySelector("#hotfix-result").classList.remove("hidden");
   document.querySelector("#hotfix-output").classList.remove("empty");
   document.querySelector("#hotfix-summary").textContent = artifact.summary.summary;
+  document.querySelector("#codex-tests").innerHTML = artifact.summary.tests.length
+    ? artifact.summary.tests
+      .map((test) => `<div class="codex-test"><span>${escapeHtml(test.command)}</span><strong class="${escapeHtml(test.outcome)}">${escapeHtml(test.outcome.replace("_", " "))}</strong></div>`)
+      .join("")
+    : '<div class="codex-test"><span>No test result reported</span><strong class="not_run">not run</strong></div>';
   document.querySelector("#changed-files").innerHTML = artifact.changed_files
     .map((path) => `<div class="changed-file">${escapeHtml(path)}</div>`)
     .join("");
+  document.querySelector("#hotfix-patch").textContent = artifact.patch;
   document.querySelector("#hotfix-state").textContent = "Generated";
   document.querySelector("#hotfix-state").className = "run-state complete";
 }
@@ -285,11 +291,69 @@ document.querySelector("#publish-hotfix-button").addEventListener("click", async
     if (!response.ok) throw new Error(body.detail || "Could not publish branch");
     document.querySelector("#candidate-sha").value = body.artifact.published_commit_sha;
     document.querySelector("#candidate-ref").value = body.artifact.branch_name;
-    status.textContent = "Published · candidate SHA filled above";
+    status.textContent = "Published · candidate SHA filled above.";
     button.textContent = "Branch published";
+    document.querySelector("#verify-hotfix-button").classList.remove("hidden");
   } catch (error) {
     status.textContent = error.message;
     button.disabled = false;
+  }
+});
+
+function buildHotfixVerification() {
+  const knownGoodSha = document.querySelector("#known-good-sha").value.trim();
+  if (!/^[0-9a-fA-F]{40}$/.test(knownGoodSha)) {
+    throw new Error("Enter the known-good revision's full 40-character commit SHA first.");
+  }
+  const startupCommand = JSON.parse(document.querySelector("#startup-command").value);
+  if (!Array.isArray(startupCommand) || startupCommand.some((argument) => typeof argument !== "string")) {
+    throw new TypeError("Startup command must be a JSON array of strings.");
+  }
+  return {
+    known_good_ref: document.querySelector("#known-good-ref").value.trim(),
+    known_good_commit_sha: knownGoodSha,
+    startup_command: startupCommand,
+    service_port: Number(document.querySelector("#service-port").value),
+    health_path: document.querySelector("#health-path").value.trim(),
+    container_image: document.querySelector("#container-image").value.trim(),
+    runtime: selectedRuntime,
+  };
+}
+
+document.querySelector("#verify-hotfix-button").addEventListener("click", async () => {
+  const button = document.querySelector("#verify-hotfix-button");
+  const status = document.querySelector("#verification-status");
+  let verificationStarted = false;
+  if (!currentHotfixId) return;
+  status.textContent = "";
+  try {
+    const verification = buildHotfixVerification();
+    button.disabled = true;
+    button.textContent = "Starting verification…";
+    setRunning(true);
+    verificationStarted = true;
+    const response = await fetch(`/api/hotfixes/${currentHotfixId}/investigations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(verification),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail?.[0]?.msg || body.detail || "Could not start verification");
+    currentInvestigationId = body.investigation_id;
+    renderReport(await waitForInvestigation(currentInvestigationId));
+    status.textContent = "Verification complete · evidence is shown in the comparison panel.";
+    button.textContent = "Verification complete";
+  } catch (error) {
+    status.textContent = error instanceof SyntaxError ? "A service JSON field is invalid." : error.message;
+    if (verificationStarted) {
+      runState.textContent = "Idle";
+      runState.className = "run-state idle";
+    }
+    button.disabled = false;
+    button.textContent = "Verify in three lanes";
+  } finally {
+    runButton.disabled = false;
+    runButton.querySelector("span:first-child").textContent = "Run comparison";
   }
 });
 

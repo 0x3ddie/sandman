@@ -10,6 +10,7 @@ from sandman.remediation import (
     BranchPublication,
     BranchPublisher,
     CodexRunSummary,
+    CodexTestResult,
     HotfixAgent,
     HotfixArtifact,
     HotfixRequest,
@@ -34,6 +35,27 @@ class FakeHotfixAgent(HotfixAgent):
 class FakeBranchPublisher(BranchPublisher):
     def publish(self, request: HotfixRequest, artifact: HotfixArtifact) -> BranchPublication:
         return BranchPublication(branch_name=request.branch_name, commit_sha="b" * 40)
+
+
+class FailingTestHotfixAgent(HotfixAgent):
+    def generate(self, request: HotfixRequest) -> HotfixArtifact:
+        return (
+            FakeHotfixAgent()
+            .generate(request)
+            .model_copy(
+                update={
+                    "summary": CodexRunSummary(
+                        summary="Patch still fails its regression test",
+                        tests=(
+                            CodexTestResult(
+                                command="pytest tests/test_checkout.py", outcome="failed"
+                            ),
+                        ),
+                        notes=(),
+                    )
+                }
+            )
+        )
 
 
 async def test_demo_investigation_completes() -> None:
@@ -184,6 +206,23 @@ async def test_hotfix_publication_requires_configured_token() -> None:
 
         assert publication.status_code == 503
         assert publication.json()["detail"] == "GITHUB_TOKEN is not configured"
+
+
+async def test_hotfix_publication_rejects_reported_test_failure() -> None:
+    app = create_app(
+        hotfix_agent_override=FailingTestHotfixAgent(),
+        branch_publisher_override=FakeBranchPublisher(),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/hotfixes", json=hotfix_payload())
+        hotfix_id = response.json()["hotfix_id"]
+        await wait_until_hotfix_complete(client, hotfix_id)
+
+        publication = await client.post(f"/api/hotfixes/{hotfix_id}/publish")
+
+        assert publication.status_code == 409
+        assert publication.json()["detail"] == "Codex reported a failing test"
 
 
 def hotfix_payload() -> dict[str, object]:

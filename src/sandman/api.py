@@ -120,6 +120,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="Hotfix generation is not complete")
         if record.artifact.published_commit_sha is not None:
             return record
+        if any(test.outcome == "failed" for test in record.artifact.summary.tests):
+            raise HTTPException(status_code=409, detail="Codex reported a failing test")
         if branch_publisher is None:
             raise HTTPException(status_code=503, detail="GITHUB_TOKEN is not configured")
         try:

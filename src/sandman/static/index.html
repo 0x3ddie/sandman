@@ -231,13 +231,26 @@
             <div id="hotfix-result" class="hidden">
               <p class="step-label">Candidate patch</p>
               <h3 id="hotfix-summary"></h3>
+              <div id="codex-tests" class="codex-tests"></div>
               <div id="changed-files" class="changed-files"></div>
+              <details class="patch-review">
+                <summary>Review generated diff</summary>
+                <pre id="hotfix-patch"></pre>
+              </details>
               <div class="hotfix-actions">
                 <button id="publish-hotfix-button" class="secondary-button" type="button">
                   Publish candidate branch
                 </button>
-                <span id="publish-status"></span>
+                <button
+                  id="verify-hotfix-button"
+                  class="secondary-button hidden"
+                  type="button"
+                >
+                  Verify in three lanes
+                </button>
               </div>
+              <p id="publish-status" class="action-status"></p>
+              <p id="verification-status" class="action-status"></p>
             </div>
           </article>
         </div>
