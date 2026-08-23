@@ -1,0 +1,19 @@
+version = 1
+repository_url = "https://github.com/0x3ddie/sandman"
+runtime = "modal"
+modal_app_name = "sandman-production-probes"
+
+[service]
+startup_command = ["python", "examples/modal_fixture.py"]
+port = 8000
+health_path = "/health"
+container_image = "python:3.12-slim"
+
+[probes.checkout]
+method = "GET"
+path = "/api/checkout/quote"
+expected_status = 200
+timeout_seconds = 20
+
+[probes.checkout.expected_json]
+currency = "USD"

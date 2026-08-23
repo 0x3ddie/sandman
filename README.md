@@ -26,10 +26,34 @@ release; Sandman produces pre-rollout evidence in isolated, production-fidelity 
 
 ```bash
 uv sync
-uv run sandman
+uv run sandman serve
 ```
 
 Open <http://127.0.0.1:8000> and run the preloaded safe demo.
+
+## Run from the terminal
+
+Commit a `.sandman.toml` file that defines the service startup contract and named,
+sanitized probes. Validate it before spending cloud credits:
+
+```bash
+uv run sandman config
+```
+
+Run an exact three-revision comparison locally or in CI. Every revision uses `REF@SHA`
+so the evidence cannot drift while the investigation is running:
+
+```bash
+uv run sandman investigate \
+  --probe checkout \
+  --known-good codex/modal-known-good@3a041eabae8651bc7ed60e4adaa7cf9f1605df02 \
+  --current codex/modal-current@0c7a187e36da4e24dbad487fdde7ab2299d89063 \
+  --candidate codex/modal-candidate@b218110c5e94fbe8a9c1413642bd85fffb810625
+```
+
+Use `--json` for GitHub Actions or another automation consumer. The command returns zero
+only when the candidate is verified as safe to review, one for a completed but unsafe
+verdict, and two for configuration or execution failure.
 
 ## Run the checks
 
