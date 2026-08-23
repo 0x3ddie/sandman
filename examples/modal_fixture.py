@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-REGRESSION_ACTIVE = False
+REGRESSION_ACTIVE = True
 
 
 class Handler(BaseHTTPRequestHandler):
