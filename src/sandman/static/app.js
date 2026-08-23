@@ -8,12 +8,13 @@ const verdict = document.querySelector("#verdict");
 let selectedRuntime = "demo";
 let currentInvestigationId = null;
 let currentReport = null;
+let currentHotfixId = null;
 
 const demoValues = {
   repository: "https://github.com/0x3ddie/sandman-demo",
   "known-good-ref": "v1.4.2",
   "current-ref": "main",
-  "candidate-ref": "hotfix/currency-validation",
+  "candidate-ref": "sandman/currency-validation",
   method: "POST",
   path: "/api/checkout/quote",
   "expected-status": "200",
@@ -176,6 +177,121 @@ async function waitForInvestigation(id) {
     await new Promise((resolve) => window.setTimeout(resolve, 350));
   }
 }
+
+function buildHotfixRequest() {
+  const currentSha = document.querySelector("#current-sha").value.trim();
+  if (!/^[0-9a-fA-F]{40}$/.test(currentSha)) {
+    throw new Error("Enter the current revision's full 40-character commit SHA first.");
+  }
+  if (!document.querySelector("#redaction-confirmed").checked) {
+    throw new Error("Confirm that the incident evidence has been sanitized.");
+  }
+  const requestBody = document.querySelector("#json-body").value.trim();
+  const observedBody = document.querySelector("#observed-json").value.trim();
+  const logLines = document.querySelector("#incident-logs").value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const testGuidance = document.querySelector("#test-guidance").value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return {
+    repository_url: document.querySelector("#repository").value.trim(),
+    base_ref: document.querySelector("#current-ref").value.trim(),
+    base_commit_sha: currentSha,
+    branch_name: document.querySelector("#candidate-ref").value.trim(),
+    trace: {
+      trace_id: document.querySelector("#trace-id").value.trim(),
+      redacted: true,
+      method: document.querySelector("#method").value,
+      path: document.querySelector("#path").value.trim(),
+      json_body: requestBody ? JSON.parse(requestBody) : null,
+      observed: {
+        status_code: Number(document.querySelector("#observed-status").value),
+        json_body: observedBody ? JSON.parse(observedBody) : null,
+      },
+      expected_status: Number(document.querySelector("#expected-status").value),
+      logs: logLines,
+    },
+    test_guidance: testGuidance,
+  };
+}
+
+async function waitForHotfix(id) {
+  for (;;) {
+    const response = await fetch(`/api/hotfixes/${id}`);
+    if (!response.ok) throw new Error("Could not read hotfix status");
+    const record = await response.json();
+    if (record.state === "completed") return record;
+    if (record.state === "failed") throw new Error(record.error || "Hotfix generation failed");
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+  }
+}
+
+function renderHotfix(record) {
+  const artifact = record.artifact;
+  document.querySelector("#hotfix-placeholder").classList.add("hidden");
+  document.querySelector("#hotfix-result").classList.remove("hidden");
+  document.querySelector("#hotfix-output").classList.remove("empty");
+  document.querySelector("#hotfix-summary").textContent = artifact.summary.summary;
+  document.querySelector("#changed-files").innerHTML = artifact.changed_files
+    .map((path) => `<div class="changed-file">${escapeHtml(path)}</div>`)
+    .join("");
+  document.querySelector("#hotfix-state").textContent = "Generated";
+  document.querySelector("#hotfix-state").className = "run-state complete";
+}
+
+document.querySelector("#generate-hotfix-button").addEventListener("click", async () => {
+  const button = document.querySelector("#generate-hotfix-button");
+  const errorOutput = document.querySelector("#hotfix-error");
+  let generationStarted = false;
+  errorOutput.textContent = "";
+  try {
+    const request = buildHotfixRequest();
+    button.disabled = true;
+    button.querySelector("span:first-child").textContent = "Codex is generating…";
+    document.querySelector("#hotfix-state").textContent = "Generating";
+    document.querySelector("#hotfix-state").className = "run-state running";
+    generationStarted = true;
+    const response = await fetch("/api/hotfixes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail?.[0]?.msg || body.detail || "Could not start Codex");
+    currentHotfixId = body.hotfix_id;
+    renderHotfix(await waitForHotfix(currentHotfixId));
+  } catch (error) {
+    errorOutput.textContent = error instanceof SyntaxError ? "An incident JSON field is invalid." : error.message;
+    document.querySelector("#hotfix-state").textContent = generationStarted ? "Failed" : "Ready";
+    document.querySelector("#hotfix-state").className = generationStarted ? "run-state" : "run-state idle";
+  } finally {
+    button.disabled = false;
+    button.querySelector("span:first-child").textContent = "Generate candidate patch";
+  }
+});
+
+document.querySelector("#publish-hotfix-button").addEventListener("click", async () => {
+  const button = document.querySelector("#publish-hotfix-button");
+  const status = document.querySelector("#publish-status");
+  if (!currentHotfixId) return;
+  button.disabled = true;
+  status.textContent = "Publishing…";
+  try {
+    const response = await fetch(`/api/hotfixes/${currentHotfixId}/publish`, { method: "POST" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || "Could not publish branch");
+    document.querySelector("#candidate-sha").value = body.artifact.published_commit_sha;
+    document.querySelector("#candidate-ref").value = body.artifact.branch_name;
+    status.textContent = "Published · candidate SHA filled above";
+    button.textContent = "Branch published";
+  } catch (error) {
+    status.textContent = error.message;
+    button.disabled = false;
+  }
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();

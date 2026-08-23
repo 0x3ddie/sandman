@@ -6,6 +6,34 @@ import time
 import httpx
 
 from sandman.api import create_app
+from sandman.remediation import (
+    BranchPublication,
+    BranchPublisher,
+    CodexRunSummary,
+    HotfixAgent,
+    HotfixArtifact,
+    HotfixRequest,
+)
+
+
+class FakeHotfixAgent(HotfixAgent):
+    def generate(self, request: HotfixRequest) -> HotfixArtifact:
+        return HotfixArtifact(
+            branch_name=request.branch_name,
+            base_commit_sha=request.base_commit_sha,
+            patch="diff --git a/app.py b/app.py\n",
+            changed_files=("app.py", "tests/test_app.py"),
+            summary=CodexRunSummary(
+                summary="Added currency validation and a regression test",
+                tests=(),
+                notes=(),
+            ),
+        )
+
+
+class FakeBranchPublisher(BranchPublisher):
+    def publish(self, request: HotfixRequest, artifact: HotfixArtifact) -> BranchPublication:
+        return BranchPublication(branch_name=request.branch_name, commit_sha="b" * 40)
 
 
 async def test_demo_investigation_completes() -> None:
@@ -110,6 +138,78 @@ async def test_pull_request_rejects_unverified_candidate_before_token_check() ->
         assert pull_request.json()["detail"] == "Candidate has not been verified"
 
 
+async def test_hotfix_generation_publication_and_verification_flow() -> None:
+    app = create_app(
+        hotfix_agent_override=FakeHotfixAgent(),
+        branch_publisher_override=FakeBranchPublisher(),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/hotfixes", json=hotfix_payload())
+        assert response.status_code == 202
+        hotfix_id = response.json()["hotfix_id"]
+        hotfix = await wait_until_hotfix_complete(client, hotfix_id)
+        assert hotfix["artifact"]["changed_files"] == ["app.py", "tests/test_app.py"]
+
+        publication = await client.post(f"/api/hotfixes/{hotfix_id}/publish")
+        assert publication.status_code == 200
+        assert publication.json()["artifact"]["published_commit_sha"] == "b" * 40
+
+        verification = await client.post(
+            f"/api/hotfixes/{hotfix_id}/investigations",
+            json={
+                "known_good_ref": "v1.0.0",
+                "known_good_commit_sha": "c" * 40,
+                "startup_command": ["python", "app.py"],
+                "service_port": 8000,
+                "health_path": "/health",
+                "runtime": "demo",
+            },
+        )
+        assert verification.status_code == 202
+        investigation_id = verification.json()["investigation_id"]
+        investigation = await wait_until_complete(client, investigation_id)
+        assert investigation["report"]["verdict"]["kind"] == "candidate_verified"
+
+
+async def test_hotfix_publication_requires_configured_token() -> None:
+    app = create_app(hotfix_agent_override=FakeHotfixAgent())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/api/hotfixes", json=hotfix_payload())
+        hotfix_id = response.json()["hotfix_id"]
+        await wait_until_hotfix_complete(client, hotfix_id)
+
+        publication = await client.post(f"/api/hotfixes/{hotfix_id}/publish")
+
+        assert publication.status_code == 503
+        assert publication.json()["detail"] == "GITHUB_TOKEN is not configured"
+
+
+def hotfix_payload() -> dict[str, object]:
+    return {
+        "repository_url": "https://github.com/example/service",
+        "base_ref": "main",
+        "base_commit_sha": "a" * 40,
+        "branch_name": "sandman/fix-checkout",
+        "trace": {
+            "trace_id": "checkout-500",
+            "redacted": True,
+            "method": "POST",
+            "path": "/api/checkout/quote",
+            "json_body": {"currency": "USD"},
+            "observed": {
+                "status_code": 500,
+                "json_body": {"error": "currency required"},
+            },
+            "expected_status": 200,
+            "expected_json": {"currency": "USD"},
+            "logs": ["ValueError: currency required"],
+        },
+        "test_guidance": ["pytest tests/test_checkout.py"],
+    }
+
+
 async def wait_until_complete(
     client: httpx.AsyncClient, investigation_id: str
 ) -> dict[str, object]:
@@ -121,3 +221,16 @@ async def wait_until_complete(
             return record
         await asyncio.sleep(0.02)
     raise AssertionError("investigation did not complete")
+
+
+async def wait_until_hotfix_complete(
+    client: httpx.AsyncClient, hotfix_id: str
+) -> dict[str, object]:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        response = await client.get(f"/api/hotfixes/{hotfix_id}")
+        record: dict[str, object] = response.json()
+        if record["state"] == "completed":
+            return record
+        await asyncio.sleep(0.02)
+    raise AssertionError("hotfix generation did not complete")

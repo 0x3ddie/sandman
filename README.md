@@ -19,6 +19,8 @@ release; Sandman produces pre-rollout evidence in isolated, production-fidelity 
 - Evidence-rich GitHub draft PR creation
 - Greptile configuration and targeted review handoff
 - Validation that rejects credentials in repository URLs and sensitive probe headers
+- Sanitized incident-to-hotfix generation with the local Codex CLI
+- Explicit candidate-branch publication followed by three-lane verification
 
 ## Run locally
 
@@ -57,6 +59,24 @@ The browser demo defaults to `python -m http.server 8000`; replace that command 
 Modal against a real service. The control plane intentionally does not accept raw secrets,
 authorization headers, cookies, private repository tokens, or production database access.
 
+## Codex remediation
+
+The remediation flow turns sanitized incident evidence into a bounded candidate patch:
+
+1. Submit the current revision, an exact 40-character commit SHA, a `sandman/` branch name,
+   and a redacted trace to `POST /api/hotfixes`.
+2. Sandman clones only that revision into a disposable workspace and runs `codex exec` in
+   ephemeral, workspace-write mode without GitHub or Modal credentials.
+3. Sandman rejects oversized patches and changes to protected files such as credentials,
+   GitHub workflows, agent instructions, and its own control directory.
+4. Publish the reviewed artifact explicitly with `POST /api/hotfixes/{id}/publish`.
+5. Start a normal three-lane investigation with
+   `POST /api/hotfixes/{id}/investigations`; the candidate commit must reproduce the fix
+   before Sandman permits a draft pull request.
+
+Generation and publication are deliberately separate. Codex cannot push a branch, and
+the GitHub token is only provided to the narrowly scoped publication step.
+
 ## Pull requests and Greptile
 
 Set `GITHUB_TOKEN` in the control-plane environment to enable:
@@ -80,6 +100,10 @@ Sandman control plane
       ├── known-good ref ── isolated sandbox ──┐
       ├── current ref ───── isolated sandbox ──┼── verdict engine
       └── candidate ref ─── isolated sandbox ──┘        │
+                 ▲                                      │
+        explicit publish                                │
+                 ▲                                      │
+       bounded Codex patch                              │
                                                         ▼
                                             evidence-backed draft PR
                                                         │

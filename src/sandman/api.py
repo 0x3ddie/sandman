@@ -10,6 +10,17 @@ from fastapi.staticfiles import StaticFiles
 from sandman.config import Settings
 from sandman.github import GitHubPullRequestPublisher, PullRequestRequest, PullRequestResult
 from sandman.models import InvestigationRecord, InvestigationRequest, RuntimeName
+from sandman.remediation import (
+    BranchPublisher,
+    CodexCliHotfixAgent,
+    GitHubBranchPublisher,
+    HotfixAgent,
+    HotfixRecord,
+    HotfixRequest,
+    HotfixService,
+    HotfixStore,
+    HotfixVerificationRequest,
+)
 from sandman.runtime import DemoSandboxRuntime, ModalSandboxRuntime, SandboxRuntime
 from sandman.service import InvestigationService, InvestigationStore
 
@@ -17,6 +28,8 @@ from sandman.service import InvestigationService, InvestigationStore
 def create_app(
     settings: Settings | None = None,
     runtime_overrides: dict[RuntimeName, SandboxRuntime] | None = None,
+    hotfix_agent_override: HotfixAgent | None = None,
+    branch_publisher_override: BranchPublisher | None = None,
 ) -> FastAPI:
     active_settings = settings or Settings.from_environment()
     store = InvestigationStore()
@@ -27,6 +40,15 @@ def create_app(
     if runtime_overrides:
         runtimes.update(runtime_overrides)
     service = InvestigationService(runtimes, store)
+    hotfix_store = HotfixStore()
+    hotfix_agent = hotfix_agent_override or CodexCliHotfixAgent(
+        codex_executable=active_settings.codex_executable,
+        timeout_seconds=active_settings.codex_timeout_seconds,
+    )
+    hotfix_service = HotfixService(hotfix_agent, hotfix_store)
+    branch_publisher = branch_publisher_override
+    if branch_publisher is None and active_settings.github_token is not None:
+        branch_publisher = GitHubBranchPublisher(active_settings.github_token)
     tasks: set[asyncio.Task[None]] = set()
 
     app = FastAPI(
@@ -36,6 +58,8 @@ def create_app(
     )
     app.state.store = store
     app.state.service = service
+    app.state.hotfix_store = hotfix_store
+    app.state.hotfix_service = hotfix_service
     app.state.tasks = tasks
 
     static_dir = Path(__file__).parent / "static"
@@ -67,6 +91,67 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="Investigation not found")
         return record
+
+    @app.post(
+        "/api/hotfixes",
+        response_model=HotfixRecord,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def create_hotfix(request: HotfixRequest) -> HotfixRecord:
+        record = hotfix_service.enqueue(request)
+        task = asyncio.create_task(hotfix_service.execute(record.hotfix_id, request))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return record
+
+    @app.get("/api/hotfixes/{hotfix_id}", response_model=HotfixRecord)
+    def get_hotfix(hotfix_id: str) -> HotfixRecord:
+        record = hotfix_store.get(hotfix_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Hotfix not found")
+        return record
+
+    @app.post("/api/hotfixes/{hotfix_id}/publish", response_model=HotfixRecord)
+    async def publish_hotfix(hotfix_id: str) -> HotfixRecord:
+        record = hotfix_store.get(hotfix_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Hotfix not found")
+        if record.artifact is None:
+            raise HTTPException(status_code=409, detail="Hotfix generation is not complete")
+        if record.artifact.published_commit_sha is not None:
+            return record
+        if branch_publisher is None:
+            raise HTTPException(status_code=503, detail="GITHUB_TOKEN is not configured")
+        try:
+            publication = await asyncio.to_thread(
+                branch_publisher.publish, record.request, record.artifact
+            )
+            return hotfix_service.record_publication(hotfix_id, publication)
+        except RuntimeError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @app.post(
+        "/api/hotfixes/{hotfix_id}/investigations",
+        response_model=InvestigationRecord,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def verify_hotfix(
+        hotfix_id: str, verification: HotfixVerificationRequest
+    ) -> InvestigationRecord:
+        record = hotfix_store.get(hotfix_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Hotfix not found")
+        try:
+            investigation_request = verification.build_investigation(record)
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        investigation = service.enqueue(investigation_request)
+        task = asyncio.create_task(
+            service.execute(investigation.investigation_id, investigation_request)
+        )
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return investigation
 
     @app.post(
         "/api/investigations/{investigation_id}/pull-requests",

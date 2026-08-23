@@ -179,6 +179,70 @@
         </section>
       </section>
 
+      <section class="panel remediation-workbench">
+        <div class="panel-heading">
+          <div>
+            <p class="step-label">04 / Remediate</p>
+            <h2>Generate a bounded hotfix with Codex</h2>
+          </div>
+          <div id="hotfix-state" class="run-state idle">Ready</div>
+        </div>
+
+        <div class="remediation-grid">
+          <div>
+            <div class="field-grid trace-grid">
+              <label>
+                <span>Trace ID</span>
+                <input id="trace-id" value="checkout-500" />
+              </label>
+              <label>
+                <span>Observed HTTP</span>
+                <input id="observed-status" type="number" min="100" max="599" value="500" />
+              </label>
+            </div>
+            <label>
+              <span>Observed response JSON</span>
+              <textarea id="observed-json" rows="4" spellcheck="false">{"error":"currency code is required"}</textarea>
+            </label>
+            <label>
+              <span>Sanitized incident logs</span>
+              <textarea id="incident-logs" rows="3" spellcheck="false">ValueError: currency code is required</textarea>
+            </label>
+            <label>
+              <span>Test guidance · one command per line</span>
+              <textarea id="test-guidance" rows="2" spellcheck="false">pytest tests/test_checkout.py</textarea>
+            </label>
+            <label class="redaction-check">
+              <input id="redaction-confirmed" type="checkbox" checked />
+              <span>I confirm this evidence is sanitized and contains no customer data or secrets.</span>
+            </label>
+            <button id="generate-hotfix-button" class="primary-button wide-button" type="button">
+              <span>Generate candidate patch</span><span aria-hidden="true">↗</span>
+            </button>
+            <p id="hotfix-error" class="form-error" role="alert"></p>
+          </div>
+
+          <article id="hotfix-output" class="hotfix-output empty">
+            <div id="hotfix-placeholder">
+              <span class="code-glyph" aria-hidden="true">⌁</span>
+              <h3>Codex works in a disposable clone</h3>
+              <p>No branch is pushed until you review the changed files and publish explicitly.</p>
+            </div>
+            <div id="hotfix-result" class="hidden">
+              <p class="step-label">Candidate patch</p>
+              <h3 id="hotfix-summary"></h3>
+              <div id="changed-files" class="changed-files"></div>
+              <div class="hotfix-actions">
+                <button id="publish-hotfix-button" class="secondary-button" type="button">
+                  Publish candidate branch
+                </button>
+                <span id="publish-status"></span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <section class="proof-strip" aria-label="Workflow">
         <span>Production trace</span><i></i><span>3 Modal sandboxes</span><i></i
         ><span>Evidence-backed PR</span><i></i><span>Greptile review</span>
