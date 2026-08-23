@@ -12,6 +12,7 @@ from typing import TextIO
 import uvicorn
 from pydantic import ValidationError
 
+from sandman.config import Settings
 from sandman.github import (
     GitHubCheckPublisher,
     GitHubPullRequestPublisher,
@@ -20,7 +21,16 @@ from sandman.github import (
     resolve_sandman_comment,
 )
 from sandman.models import InvestigationReport, Lane, Revision, RuntimeName
+from sandman.pipeline import RemediationPipeline
 from sandman.project import load_project_config
+from sandman.remediation import (
+    CodexCliHotfixAgent,
+    GitHubBranchPublisher,
+    HotfixRequest,
+    HotfixStore,
+    HotfixVerificationRequest,
+    IncidentTrace,
+)
 from sandman.runtime import DemoSandboxRuntime, ModalSandboxRuntime
 from sandman.service import InvestigationService, InvestigationStore
 from sandman.state import StateDatabase
@@ -46,6 +56,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _investigate(arguments, sys.stdout, sys.stderr)
     if arguments.command == "github-context":
         return _github_context(arguments.event, sys.stdout, sys.stderr)
+    if arguments.command == "remediate":
+        return _remediate(arguments, sys.stdout, sys.stderr)
     parser.error(f"unknown command: {arguments.command}")
     return 2
 
@@ -99,6 +111,27 @@ def build_parser() -> argparse.ArgumentParser:
         "github-context", help="validate a /sandman pull request comment event"
     )
     github_context.add_argument("--event", type=Path, required=True)
+
+    remediate = commands.add_parser(
+        "remediate", help="generate, publish, and verify a bounded Codex hotfix"
+    )
+    remediate.add_argument("--config", type=Path, default=Path(".sandman.toml"))
+    remediate.add_argument("--trace", type=Path, required=True, help="sanitized incident JSON")
+    remediate.add_argument("--known-good", required=True, metavar="REF@SHA")
+    remediate.add_argument("--current", required=True, metavar="REF@SHA")
+    remediate.add_argument("--branch", required=True, help="new sandman/ candidate branch")
+    remediate.add_argument("--test", action="append", default=[], help="test guidance for Codex")
+    remediate.add_argument("--runtime", choices=tuple(RuntimeName), default=None)
+    remediate.add_argument(
+        "--publish",
+        action="store_true",
+        help="confirm publication of the generated candidate branch",
+    )
+    remediate.add_argument("--github-check", action="store_true")
+    remediate.add_argument("--create-pr", action="store_true")
+    remediate.add_argument("--pr-base")
+    remediate.add_argument("--pr-title")
+    remediate.add_argument("--state-database", type=Path)
     return parser
 
 
@@ -132,6 +165,75 @@ def _github_context(path: Path, stdout: TextIO, stderr: TextIO) -> int:
     return 0
 
 
+def _remediate(arguments: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    if not arguments.publish:
+        print("sandman: pass --publish to confirm candidate branch publication", file=stderr)
+        return 2
+    try:
+        settings = Settings.from_environment()
+        if settings.github_token is None:
+            raise ValueError("GITHUB_TOKEN is required to publish a candidate branch")
+        config = load_project_config(arguments.config)
+        known_good = _parse_revision(Lane.KNOWN_GOOD, arguments.known_good, "Known good")
+        current = _parse_revision(Lane.CURRENT, arguments.current, "Current")
+        if known_good.commit_sha is None or current.commit_sha is None:
+            raise ValueError("known-good and current revisions must include exact commit SHAs")
+        trace_payload = json.loads(arguments.trace.read_text(encoding="utf-8"))
+        trace = IncidentTrace.model_validate(trace_payload)
+        runtime = RuntimeName(arguments.runtime) if arguments.runtime else config.runtime
+        database_path = _state_database_path(arguments.state_database)
+        database = StateDatabase(database_path) if database_path else None
+        hotfix_request = HotfixRequest(
+            repository_url=config.repository_url,
+            base_ref=current.git_ref,
+            base_commit_sha=current.commit_sha,
+            branch_name=arguments.branch,
+            trace=trace,
+            test_guidance=tuple(arguments.test),
+        )
+        verification = HotfixVerificationRequest(
+            known_good_ref=known_good.git_ref,
+            known_good_commit_sha=known_good.commit_sha,
+            startup_command=config.service.startup_command,
+            service_port=config.service.port,
+            health_path=config.service.health_path,
+            container_image=config.service.container_image,
+            runtime=runtime,
+        )
+        investigation_store = InvestigationStore(database)
+        sandbox_runtime = (
+            DemoSandboxRuntime()
+            if runtime is RuntimeName.DEMO
+            else ModalSandboxRuntime(config.modal_app_name)
+        )
+        pipeline = RemediationPipeline(
+            CodexCliHotfixAgent(
+                codex_executable=settings.codex_executable,
+                timeout_seconds=settings.codex_timeout_seconds,
+            ),
+            GitHubBranchPublisher(settings.github_token),
+            HotfixStore(database),
+            InvestigationService({runtime: sandbox_runtime}, investigation_store),
+            investigation_store,
+        )
+        result = asyncio.run(pipeline.run(hotfix_request, verification))
+    except (OSError, RuntimeError, ValueError, ValidationError) as error:
+        print(f"sandman: {error}", file=stderr)
+        return 2
+
+    report = result.investigation.report
+    if report is None:
+        print("sandman: candidate verification did not produce a report", file=stderr)
+        return 2
+    _print_report(report, stdout)
+    try:
+        _publish_github_outputs(arguments, report, stdout)
+    except (RuntimeError, ValueError) as error:
+        print(f"sandman: {error}", file=stderr)
+        return 2
+    return 0 if report.verdict.safe_to_review else 1
+
+
 def _investigate(arguments: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
     try:
         config = load_project_config(arguments.config)
@@ -150,9 +252,7 @@ def _investigate(arguments: argparse.Namespace, stdout: TextIO, stderr: TextIO) 
         print(f"sandman: {error}", file=stderr)
         return 2
 
-    database_path = arguments.state_database
-    if database_path is None and (environment_path := os.getenv("SANDMAN_STATE_DATABASE")):
-        database_path = Path(environment_path)
+    database_path = _state_database_path(arguments.state_database)
     store = InvestigationStore(StateDatabase(database_path) if database_path else None)
     sandbox_runtime = (
         DemoSandboxRuntime()
@@ -177,6 +277,13 @@ def _investigate(arguments: argparse.Namespace, stdout: TextIO, stderr: TextIO) 
         print(f"sandman: {error}", file=stderr)
         return 2
     return 0 if completed.report.verdict.safe_to_review else 1
+
+
+def _state_database_path(argument: Path | None) -> Path | None:
+    if argument is not None:
+        return argument
+    environment_path = os.getenv("SANDMAN_STATE_DATABASE")
+    return Path(environment_path) if environment_path else None
 
 
 def _parse_revision(lane: Lane, value: str, label: str) -> Revision:

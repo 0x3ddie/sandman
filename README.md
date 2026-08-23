@@ -56,6 +56,23 @@ Use `--json` for GitHub Actions or another automation consumer. The command retu
 only when the candidate is verified as safe to review, one for a completed but unsafe
 verdict, and two for configuration or execution failure.
 
+For a sanitized incident trace, the CLI can execute the full bounded workflow. Publication
+is an explicit flag because it creates a remote branch:
+
+```bash
+uv run sandman remediate \
+  --trace incident.json \
+  --known-good production@<40-character-commit-sha> \
+  --current main@<40-character-commit-sha> \
+  --branch sandman/fix-checkout \
+  --test "pytest tests/test_checkout.py" \
+  --publish --github-check --create-pr
+```
+
+The trace uses the same redacted `IncidentTrace` schema as `POST /api/hotfixes`. Codex never
+receives the GitHub or Modal credentials; Sandman publishes only after generation and any
+Codex-reported tests succeed, then verifies the exact published commit before creating a PR.
+
 The included `Sandman production verification` workflow accepts the same named probe and
 three `REF@SHA` values through `workflow_dispatch` or `workflow_call`. Configure
 `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` as GitHub Actions secrets. The workflow posts a
