@@ -82,9 +82,25 @@ class DemoSandboxRuntime(SandboxRuntime):
 
 
 class ModalSandboxRuntime(SandboxRuntime):
-    def __init__(self, app_name: str, startup_timeout_seconds: int = 120) -> None:
+    def __init__(
+        self,
+        app_name: str,
+        startup_timeout_seconds: int = 120,
+        cpu_request: float = 0.5,
+        cpu_limit: float = 1.0,
+        memory_request_mib: int = 512,
+        memory_limit_mib: int = 1_024,
+    ) -> None:
+        if startup_timeout_seconds <= 0:
+            raise ValueError("startup timeout must be greater than zero")
+        if cpu_request <= 0 or cpu_limit < cpu_request:
+            raise ValueError("CPU limit must be greater than or equal to the request")
+        if memory_request_mib <= 0 or memory_limit_mib < memory_request_mib:
+            raise ValueError("memory limit must be greater than or equal to the request")
         self._app_name = app_name
         self._startup_timeout_seconds = startup_timeout_seconds
+        self._cpu = (cpu_request, cpu_limit)
+        self._memory = (memory_request_mib, memory_limit_mib)
 
     def probe(self, request: InvestigationRequest, revision: Revision) -> LaneResult:
         try:
@@ -132,6 +148,9 @@ exec "$@"
             image=image,
             encrypted_ports=[request.service_port],
             timeout=self._startup_timeout_seconds,
+            cpu=self._cpu,
+            memory=self._memory,
+            tags={"sandman_lane": revision.lane.value},
         )
         sandbox_id = sandbox.object_id
         try:
@@ -172,7 +191,10 @@ exec "$@"
                 observation=observation,
             )
         finally:
-            sandbox.terminate()
+            try:
+                sandbox.terminate(wait=True)
+            finally:
+                sandbox.detach()
 
     @staticmethod
     def _wait_until_healthy(url: str, timeout_seconds: float) -> None:
