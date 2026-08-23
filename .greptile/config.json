@@ -1,0 +1,7 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax", "style"],
+  "triggerOnDrafts": true,
+  "triggerOnUpdates": true
+}
+

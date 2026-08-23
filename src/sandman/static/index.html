@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Sandman replays production probes across known-good, current, and candidate revisions."
+    />
+    <title>Sandman · Differential production debugger</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <header class="shell topbar">
+      <a class="brand" href="/" aria-label="Sandman home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>sandman</span>
+      </a>
+      <div class="status-chip"><span></span> control plane ready</div>
+    </header>
+
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Differential production debugging</p>
+        <h1>Make the fix prove itself.</h1>
+        <p class="lede">
+          Replay one production-derived probe against three isolated revisions. See exactly
+          where behavior changed before a single user sees the patch.
+        </p>
+      </section>
+
+      <section class="workspace">
+        <form id="probe-form" class="panel configuration">
+          <div class="panel-heading">
+            <div>
+              <p class="step-label">01 / Configure</p>
+              <h2>Incident probe</h2>
+            </div>
+            <button id="demo-button" class="text-button" type="button">Reset demo</button>
+          </div>
+
+          <label>
+            <span>Repository</span>
+            <input id="repository" type="url" required />
+          </label>
+
+          <div class="field-grid three">
+            <label>
+              <span>Known good</span>
+              <input id="known-good-ref" required />
+            </label>
+            <label>
+              <span>Current</span>
+              <input id="current-ref" required />
+            </label>
+            <label>
+              <span>Candidate</span>
+              <input id="candidate-ref" required />
+            </label>
+          </div>
+
+          <details class="advanced-settings">
+            <summary>Service and commit settings</summary>
+            <p>Modal runs require exact commit SHAs. The safe demo can leave them blank.</p>
+            <div class="field-grid three">
+              <label>
+                <span>Known-good SHA</span>
+                <input id="known-good-sha" placeholder="7–40 hex chars" />
+              </label>
+              <label>
+                <span>Current SHA</span>
+                <input id="current-sha" placeholder="7–40 hex chars" />
+              </label>
+              <label>
+                <span>Candidate SHA</span>
+                <input id="candidate-sha" placeholder="7–40 hex chars" />
+              </label>
+            </div>
+            <div class="field-grid service-grid">
+              <label>
+                <span>Container image</span>
+                <input id="container-image" value="python:3.12-slim" />
+              </label>
+              <label>
+                <span>Port</span>
+                <input id="service-port" type="number" min="1" max="65535" value="8000" />
+              </label>
+              <label>
+                <span>Health path</span>
+                <input id="health-path" value="/health" />
+              </label>
+            </div>
+            <label>
+              <span>Startup command · JSON array</span>
+              <textarea id="startup-command" rows="2" spellcheck="false">["python", "-m", "http.server", "8000"]</textarea>
+            </label>
+          </details>
+
+          <div class="field-grid probe-grid">
+            <label>
+              <span>Method</span>
+              <select id="method">
+                <option>POST</option>
+                <option>GET</option>
+                <option>PUT</option>
+                <option>PATCH</option>
+                <option>DELETE</option>
+              </select>
+            </label>
+            <label class="path-field">
+              <span>Probe path</span>
+              <input id="path" required />
+            </label>
+            <label>
+              <span>Expect</span>
+              <input id="expected-status" type="number" min="100" max="599" required />
+            </label>
+          </div>
+
+          <label>
+            <span>JSON body</span>
+            <textarea id="json-body" rows="5" spellcheck="false"></textarea>
+          </label>
+
+          <div class="form-footer">
+            <div class="runtime-toggle" role="group" aria-label="Runtime">
+              <button class="runtime active" data-runtime="demo" type="button">Safe demo</button>
+              <button class="runtime" data-runtime="modal" type="button">Modal</button>
+            </div>
+            <button id="run-button" class="primary-button" type="submit">
+              <span>Run comparison</span>
+              <span aria-hidden="true">↗</span>
+            </button>
+          </div>
+          <p id="form-error" class="form-error" role="alert"></p>
+        </form>
+
+        <section class="panel results" aria-live="polite">
+          <div class="panel-heading">
+            <div>
+              <p class="step-label">02 / Compare</p>
+              <h2>Revision lanes</h2>
+            </div>
+            <div id="run-state" class="run-state idle">Idle</div>
+          </div>
+
+          <div id="empty-state" class="empty-state">
+            <div class="orbit" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <p>Three isolated revisions will appear here.</p>
+          </div>
+
+          <div id="lane-grid" class="lane-grid hidden"></div>
+
+          <article id="verdict" class="verdict hidden">
+            <div class="verdict-icon" aria-hidden="true">✓</div>
+            <div>
+              <p class="step-label">03 / Verdict</p>
+              <h3 id="verdict-headline"></h3>
+              <p id="verdict-detail"></p>
+              <div id="review-actions" class="review-actions hidden">
+                <button id="create-pr-button" class="secondary-button" type="button">
+                  Create evidence-backed draft PR
+                </button>
+                <span id="pr-status"></span>
+              </div>
+            </div>
+          </article>
+        </section>
+      </section>
+
+      <section class="proof-strip" aria-label="Workflow">
+        <span>Production trace</span><i></i><span>3 Modal sandboxes</span><i></i
+        ><span>Evidence-backed PR</span><i></i><span>Greptile review</span>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
