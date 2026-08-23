@@ -40,15 +40,15 @@ from typing import Any
 import httpx
 
 __all__ = [
-    "Response",
-    "Target",
-    "ProbeFailure",
     "ProbeContext",
     "ProbeDefinition",
+    "ProbeFailure",
+    "Response",
+    "Target",
+    "discover",
     "expect",
     "probe",
     "registry",
-    "discover",
 ]
 
 # Headers a probe may never send. Probes exercise disposable replicas; accepting

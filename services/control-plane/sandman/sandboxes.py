@@ -34,6 +34,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 
 import httpx
 import modal
@@ -118,10 +119,14 @@ _CREDENTIAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}\b"), "<redacted>"),
     (re.compile(r"\bak-[A-Za-z0-9_\-]{16,}\b"), "<redacted>"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "<redacted>"),
-    (re.compile(r"\b-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
-     "<redacted-private-key>"),
-    (re.compile(r"(?i)\b(authorization|bearer|token)\b\s*[:=]?\s*[A-Za-z0-9._\-]{12,}"),
-     r"\1 <redacted>"),
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+        "<redacted-private-key>",
+    ),
+    (
+        re.compile(r"(?i)\b(authorization|bearer|token)\b\s*[:=]?\s*[A-Za-z0-9._\-]{12,}"),
+        r"\1 <redacted>",
+    ),
 )
 
 #: Settings fields whose literal values must never appear in a log or an error.
@@ -393,8 +398,11 @@ class SandboxFactory:
             f"{{ git -C {quoted_dir} fetch --no-tags --filter=blob:none origin {quoted_sha} && "
             f"git -C {quoted_dir} checkout -q --detach {quoted_sha}; }}"
         )
+        # Deliberately not a login shell: the checkout must not inherit whatever
+        # an image's profile does, and `set -u` trips over profiles that leave
+        # variables unset.
         result = await self.exec(
-            handle, "bash", "-lc", script, timeout=900, env=dict(_GIT_ENV)
+            handle, "bash", "-c", script, timeout=900, env=dict(_GIT_ENV)
         )
         if not result.ok:
             raise SnapshotError(
@@ -673,8 +681,18 @@ class SandboxFactory:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=1)
+def _process_secrets() -> tuple[str, ...]:
+    """Credential values held by this process, for teardown outside a factory.
+
+    ``terminate_all`` is reachable without a :class:`SandboxFactory`, so
+    redaction there cannot depend on being handed a ``Settings``.
+    """
+    return secret_values(get_settings())
+
+
 async def _terminate_handle(
-    handle: SandboxHandle, secrets: Iterable[str] = ()
+    handle: SandboxHandle, secrets: Iterable[str] | None = None
 ) -> None:
     if handle.terminated_at is not None or handle.sandbox is None:
         handle.terminated_at = handle.terminated_at or datetime.now(UTC)
@@ -684,8 +702,9 @@ async def _terminate_handle(
     except Exception as exc:
         # Teardown runs in a finally block; raising here would mask the failure
         # that is actually worth reporting.
+        known = _process_secrets() if secrets is None else secrets
         logger.warning(
-            "could not terminate %s: %s", handle.label, redact(str(exc), secrets)
+            "could not terminate %s: %s", handle.label, redact(str(exc), known)
         )
     finally:
         handle.terminated_at = datetime.now(UTC)

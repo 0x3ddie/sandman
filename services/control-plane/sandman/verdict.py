@@ -118,7 +118,7 @@ class LaneSummary:
         if not self.latencies_ms:
             return None
         ordered = sorted(self.latencies_ms)
-        idx = min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1))))
+        idx = min(len(ordered) - 1, round(0.95 * (len(ordered) - 1)))
         return ordered[idx]
 
     def add(self, result: ProbeResult) -> None:

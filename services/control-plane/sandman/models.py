@@ -17,8 +17,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # ---------------------------------------------------------------------------
 
 
-class Variant(str, Enum):
+class Variant(StrEnum):
     """The three code revisions every investigation compares.
 
     Order is significant and fixed everywhere it is displayed: B -> I -> H.
@@ -61,7 +61,7 @@ VARIANT_ORDER: tuple[Variant, ...] = (Variant.BASELINE, Variant.INITIAL, Variant
 # ---------------------------------------------------------------------------
 
 
-class SandboxState(str, Enum):
+class SandboxState(StrEnum):
     """Lifecycle of a single sandbox.
 
     ``PROVISIONING`` is deliberately distinct from ``RUNNING``: Modal cold starts
@@ -95,7 +95,7 @@ class SandboxState(str, Enum):
         return self is SandboxState.PASSED
 
 
-class RunState(str, Enum):
+class RunState(StrEnum):
     """Lifecycle of a whole investigation."""
 
     QUEUED = "queued"
@@ -320,7 +320,7 @@ class BehavioralSignature(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class ProbeOutcome(str, Enum):
+class ProbeOutcome(StrEnum):
     PASS = "pass"
     FAIL = "fail"
     ERROR = "error"
@@ -342,7 +342,7 @@ class ProbeResult(BaseModel):
     signature: BehavioralSignature
     message: str | None = None
     latency_ms: float | None = None
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime | None = None
     logs: list[str] = Field(default_factory=list)
 
@@ -356,7 +356,7 @@ class ProbeResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Classification(str, Enum):
+class Classification(StrEnum):
     """The eight ways three pass/fail booleans can combine.
 
     Naming every combination is what turns a three-way diff from a table the
@@ -478,7 +478,7 @@ class ProbeVerdict(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
@@ -504,7 +504,7 @@ class Finding(BaseModel):
     previously_ignored: bool = False
     """True for a PRE_EXISTING failure that earlier runs also surfaced."""
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def eligible_for_hotfix(self) -> bool:

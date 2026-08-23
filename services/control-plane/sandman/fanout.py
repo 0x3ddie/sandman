@@ -45,7 +45,7 @@ from .models import (
 from .sandboxes import SandboxError, SandboxFactory, SandboxHandle
 
 try:  # The SDK is a sibling package; probes are optional at import time.
-    from sandman_sdk import ProbeDefinition, ProbeFailure, ProbeContext, Target, registry
+    from sandman_sdk import ProbeContext, ProbeDefinition, ProbeFailure, Target, registry
 except ImportError:  # pragma: no cover - exercised only in partial installs
     ProbeDefinition = None  # type: ignore[assignment,misc]
     ProbeFailure = AssertionError  # type: ignore[assignment,misc]

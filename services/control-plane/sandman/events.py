@@ -19,13 +19,14 @@ attaches mid-run renders a complete picture rather than an empty screen.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from .models import RunState, SandboxState, Variant
@@ -37,7 +38,7 @@ ROLLUP_INTERVAL_SECONDS = 0.25
 REPLAY_BUFFER_SIZE = 500
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     RUN_STATE = "run.state"
     RUN_PROGRESS = "run.progress"
     SANDBOX_ROLLUP = "sandbox.rollup"
@@ -121,10 +122,8 @@ class RunEventBus:
         self._closed = True
         if self._rollup_task is not None:
             self._rollup_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._rollup_task
-            except asyncio.CancelledError:
-                pass
             self._rollup_task = None
         await self._flush_rollup()
         # Wake every subscriber so their generators can exit.
@@ -138,12 +137,10 @@ class RunEventBus:
         event = Event(type=event_type, data=data, run_id=self.run_id)
         self._history.append(event)
         for queue in list(self._subscribers):
-            try:
+            # A subscriber that cannot keep up loses this event rather than
+            # stalling the run. Rollups will resynchronise its view.
+            with contextlib.suppress(asyncio.QueueFull):
                 queue.put_nowait(event)
-            except asyncio.QueueFull:
-                # A subscriber that cannot keep up loses this event rather than
-                # stalling the run. Rollups will resynchronise its view.
-                pass
         return event
 
     def set_run_state(self, state: RunState, **data: Any) -> None:
