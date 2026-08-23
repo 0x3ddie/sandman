@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from collections.abc import Sequence
@@ -16,6 +17,7 @@ from sandman.github import (
     GitHubPullRequestPublisher,
     PullRequestRequest,
     github_repository_from_url,
+    resolve_sandman_comment,
 )
 from sandman.models import InvestigationReport, Lane, Revision, RuntimeName
 from sandman.project import load_project_config
@@ -39,9 +41,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if arguments.command == "config":
-        return _validate_config(arguments.config, sys.stdout, sys.stderr)
+        return _validate_config(arguments.config, arguments.probe, sys.stdout, sys.stderr)
     if arguments.command == "investigate":
         return _investigate(arguments, sys.stdout, sys.stderr)
+    if arguments.command == "github-context":
+        return _github_context(arguments.event, sys.stdout, sys.stderr)
     parser.error(f"unknown command: {arguments.command}")
     return 2
 
@@ -59,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     config = commands.add_parser("config", help="validate repository configuration")
     config.add_argument("--config", type=Path, default=Path(".sandman.toml"))
+    config.add_argument("--probe", help="also require this named probe")
 
     investigate = commands.add_parser("investigate", help="run the three revision lanes")
     investigate.add_argument("--config", type=Path, default=Path(".sandman.toml"))
@@ -89,17 +94,41 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="persist the run to this SQLite database",
     )
+
+    github_context = commands.add_parser(
+        "github-context", help="validate a /sandman pull request comment event"
+    )
+    github_context.add_argument("--event", type=Path, required=True)
     return parser
 
 
-def _validate_config(path: Path, stdout: TextIO, stderr: TextIO) -> int:
+def _validate_config(path: Path, required_probe: str | None, stdout: TextIO, stderr: TextIO) -> int:
     try:
         config = load_project_config(path)
+        if required_probe is not None and required_probe not in config.probes:
+            raise ValueError(f"unknown probe: {required_probe}")
     except (OSError, ValueError, ValidationError) as error:
         print(f"sandman: {error}", file=stderr)
         return 2
     probe_names = ", ".join(sorted(config.probes))
     print(f"Valid Sandman config · probes: {probe_names}", file=stdout)
+    return 0
+
+
+def _github_context(path: Path, stdout: TextIO, stderr: TextIO) -> int:
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        print("sandman: GITHUB_TOKEN is required to resolve a pull request", file=stderr)
+        return 2
+    try:
+        event = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(event, dict):
+            raise ValueError("GitHub event must be a JSON object")
+        context = resolve_sandman_comment(event, token)
+    except (OSError, RuntimeError, ValueError, ValidationError) as error:
+        print(f"sandman: {error}", file=stderr)
+        return 2
+    print(context.github_outputs(), file=stdout)
     return 0
 
 

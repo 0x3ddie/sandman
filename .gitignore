@@ -3,8 +3,8 @@
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.sandman/
 .venv/
 __pycache__/
 *.egg-info/
 dist/
-

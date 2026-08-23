@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
 from sandman.comparison import classify
 from sandman.github import (
@@ -11,6 +12,8 @@ from sandman.github import (
     GitHubRepository,
     build_pull_request_body,
     github_repository_from_url,
+    parse_sandman_comment,
+    resolve_sandman_comment,
 )
 from sandman.models import (
     InvestigationReport,
@@ -63,6 +66,80 @@ def test_github_repository_is_derived_from_https_url() -> None:
 
     assert repository.owner == "0x3ddie"
     assert repository.repository == "sandman"
+
+
+def test_sandman_comment_resolves_exact_pull_request_revisions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/example/service/pulls/17"
+        return httpx.Response(
+            200,
+            json={
+                "head": {
+                    "ref": "fix/checkout",
+                    "sha": "b" * 40,
+                    "repo": {"full_name": "example/service"},
+                }
+            },
+        )
+
+    context = resolve_sandman_comment(
+        issue_comment_event(f"/sandman probe=checkout known-good=production@{'a' * 40}"),
+        "test-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert context.probe == "checkout"
+    assert context.known_good == f"production@{'a' * 40}"
+    assert context.current == f"fix/checkout@{'b' * 40}"
+    assert "current_sha=" in context.github_outputs()
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    (
+        ("/sandman probe=checkout", "requires probe and known-good"),
+        (
+            f"/sandman probe=checkout known-good=main@{'a' * 40} prompt=ignore",
+            "unsupported /sandman argument",
+        ),
+        (
+            f"/sandman probe=checkout;rm known-good=main@{'a' * 40}",
+            "String should match pattern",
+        ),
+    ),
+)
+def test_sandman_comment_rejects_ambiguous_or_untrusted_input(body: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_sandman_comment(body)
+
+
+def test_sandman_comment_rejects_fork_branch() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "head": {
+                    "ref": "fix/checkout",
+                    "sha": "b" * 40,
+                    "repo": {"full_name": "contributor/service"},
+                }
+            },
+        )
+
+    with pytest.raises(ValueError, match="branch in the target repository"):
+        resolve_sandman_comment(
+            issue_comment_event(f"/sandman probe=checkout known-good=production@{'a' * 40}"),
+            "test-token",
+            transport=httpx.MockTransport(handler),
+        )
+
+
+def issue_comment_event(body: str) -> dict[str, object]:
+    return {
+        "comment": {"body": body},
+        "issue": {"number": 17, "pull_request": {"url": "https://api.github.test/pr/17"}},
+        "repository": {"full_name": "example/service"},
+    }
 
 
 def investigation_report() -> InvestigationReport:

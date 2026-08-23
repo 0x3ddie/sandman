@@ -32,6 +32,18 @@ def test_config_command_validates_repository_config(
     assert "probes: checkout" in _captured_stdout(capsys)
 
 
+def test_config_command_requires_requested_probe(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / ".sandman.toml"
+    config_path.write_text(demo_config(), encoding="utf-8")
+
+    exit_code = main(["config", "--config", str(config_path), "--probe", "missing-probe"])
+
+    assert exit_code == 2
+    assert "unknown probe: missing-probe" in _captured_stderr(capsys)
+
+
 def test_investigate_runs_existing_engine_in_demo_mode(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

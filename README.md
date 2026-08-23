@@ -62,6 +62,19 @@ three `REF@SHA` values through `workflow_dispatch` or `workflow_call`. Configure
 GitHub Check on the candidate commit and creates a draft PR only for a verified candidate;
 the evidence-rich PR body requests Greptile review automatically.
 
+Trusted collaborators can run the complete remediation path from a failing pull request:
+
+```text
+/sandman probe=checkout known-good=production@<40-character-commit-sha>
+```
+
+Configure `OPENAI_API_KEY` in addition to the two Modal secrets. The comment workflow
+resolves the pull request head to an exact commit, runs Codex without GitHub or Modal write
+credentials, transfers only a bounded validated patch into a publication job, and then
+executes the normal three-lane verification. It currently accepts same-repository pull
+request branches; fork pull requests are rejected because a verified stacked PR cannot use
+a fork branch as its base.
+
 For a restart-safe local control plane, set
 `SANDMAN_STATE_DATABASE=.sandman/state.db`. The API and CLI share the same SQLite record
 format; `sandman investigate` also accepts `--state-database`. GitHub Actions can stay
