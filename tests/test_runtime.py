@@ -73,8 +73,8 @@ def test_modal_runtime_caps_resources_and_cleans_up(
 
     assert result.observation.passed is False
     assert "simulated startup failure" in (result.observation.error or "")
-    assert FakeSandboxFactory.options["cpu"] == (0.5, 1.0)
-    assert FakeSandboxFactory.options["memory"] == (512, 1_024)
+    assert FakeSandboxFactory.options["cpu"] == (1.0, 2.0)
+    assert FakeSandboxFactory.options["memory"] == (1_024, 2_048)
     assert FakeSandboxFactory.options["timeout"] == 45
     assert FakeSandboxFactory.options["tags"] == {"sandman_lane": "known_good"}
     assert FakeSandboxFactory.created is not None

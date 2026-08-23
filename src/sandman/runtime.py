@@ -86,10 +86,10 @@ class ModalSandboxRuntime(SandboxRuntime):
         self,
         app_name: str,
         startup_timeout_seconds: int = 120,
-        cpu_request: float = 0.5,
-        cpu_limit: float = 1.0,
-        memory_request_mib: int = 512,
-        memory_limit_mib: int = 1_024,
+        cpu_request: float = 1.0,
+        cpu_limit: float = 2.0,
+        memory_request_mib: int = 1_024,
+        memory_limit_mib: int = 2_048,
     ) -> None:
         if startup_timeout_seconds <= 0:
             raise ValueError("startup timeout must be greater than zero")
