@@ -23,6 +23,7 @@ from sandman.remediation import (
 )
 from sandman.runtime import DemoSandboxRuntime, ModalSandboxRuntime, SandboxRuntime
 from sandman.service import InvestigationService, InvestigationStore
+from sandman.state import StateDatabase
 
 
 def create_app(
@@ -32,7 +33,12 @@ def create_app(
     branch_publisher_override: BranchPublisher | None = None,
 ) -> FastAPI:
     active_settings = settings or Settings.from_environment()
-    store = InvestigationStore()
+    state_database = (
+        StateDatabase(active_settings.state_database_path)
+        if active_settings.state_database_path is not None
+        else None
+    )
+    store = InvestigationStore(state_database)
     runtimes: dict[RuntimeName, SandboxRuntime] = {
         RuntimeName.DEMO: DemoSandboxRuntime(),
         RuntimeName.MODAL: ModalSandboxRuntime(active_settings.modal_app_name),
@@ -40,7 +46,7 @@ def create_app(
     if runtime_overrides:
         runtimes.update(runtime_overrides)
     service = InvestigationService(runtimes, store)
-    hotfix_store = HotfixStore()
+    hotfix_store = HotfixStore(state_database)
     hotfix_agent = hotfix_agent_override or CodexCliHotfixAgent(
         codex_executable=active_settings.codex_executable,
         timeout_seconds=active_settings.codex_timeout_seconds,

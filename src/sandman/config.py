@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _positive_environment_integer(name: str, default: int) -> int:
@@ -24,6 +25,7 @@ class Settings:
     github_token: str | None = None
     codex_executable: str = "codex"
     codex_timeout_seconds: int = 900
+    state_database_path: Path | None = None
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -34,5 +36,10 @@ class Settings:
             codex_executable=os.getenv("SANDMAN_CODEX_EXECUTABLE", "codex"),
             codex_timeout_seconds=_positive_environment_integer(
                 "SANDMAN_CODEX_TIMEOUT_SECONDS", 900
+            ),
+            state_database_path=(
+                Path(database_path)
+                if (database_path := os.getenv("SANDMAN_STATE_DATABASE"))
+                else None
             ),
         )

@@ -27,6 +27,7 @@ from sandman.models import (
     Revision,
     RuntimeName,
 )
+from sandman.state import StateDatabase
 
 _SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization", "x-api-key"}
 _SENSITIVE_JSON_KEYS = {
@@ -46,6 +47,7 @@ _SECRET_ASSIGNMENT = re.compile(
 )
 _SAFE_REDACTIONS = {"", "***", "[redacted]", "redacted", "<redacted>"}
 _BRANCH_PATTERN = r"^sandman/[A-Za-z0-9._/-]{1,120}$"
+_HOTFIX_NAMESPACE = "hotfix"
 
 
 class TraceResponse(BaseModel):
@@ -452,8 +454,9 @@ class GitHubBranchPublisher(BranchPublisher):
 
 
 class HotfixStore:
-    def __init__(self) -> None:
+    def __init__(self, database: StateDatabase | None = None) -> None:
         self._records: dict[str, HotfixRecord] = {}
+        self._database = database
 
     def create(self, request: HotfixRequest) -> HotfixRecord:
         record = HotfixRecord(
@@ -462,15 +465,29 @@ class HotfixStore:
             request=request,
         )
         self._records[record.hotfix_id] = record
+        self._persist(record)
         return record
 
     def get(self, hotfix_id: str) -> HotfixRecord | None:
-        return self._records.get(hotfix_id)
+        record = self._records.get(hotfix_id)
+        if record is not None or self._database is None:
+            return record
+        payload = self._database.load(_HOTFIX_NAMESPACE, hotfix_id)
+        if payload is None:
+            return None
+        record = HotfixRecord.model_validate_json(payload)
+        self._records[hotfix_id] = record
+        return record
 
     def update(self, record: HotfixRecord) -> None:
         if record.hotfix_id not in self._records:
             raise KeyError(record.hotfix_id)
         self._records[record.hotfix_id] = record
+        self._persist(record)
+
+    def _persist(self, record: HotfixRecord) -> None:
+        if self._database is not None:
+            self._database.save(_HOTFIX_NAMESPACE, record.hotfix_id, record.model_dump_json())
 
 
 class HotfixService:

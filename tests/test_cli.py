@@ -7,6 +7,8 @@ import pytest
 from sandman.cli import main
 from sandman.models import RuntimeName
 from sandman.project import load_project_config
+from sandman.service import InvestigationStore
+from sandman.state import StateDatabase
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -57,6 +59,43 @@ def test_investigate_runs_existing_engine_in_demo_mode(
     assert "candidate_verified" in output
     assert "PASS  known_good" in output
     assert "FAIL  current" in output
+
+
+def test_investigate_persists_completed_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / ".sandman.toml"
+    database_path = tmp_path / "state.db"
+    config_path.write_text(demo_config(), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "investigate",
+            "--config",
+            str(config_path),
+            "--probe",
+            "checkout",
+            "--known-good",
+            f"v1.0.0@{SHA_A}",
+            "--current",
+            f"main@{SHA_B}",
+            "--candidate",
+            f"sandman/fix@{SHA_C}",
+            "--state-database",
+            str(database_path),
+        ]
+    )
+
+    output = _captured_stdout(capsys)
+    investigation_id = next(
+        line.removeprefix("Run: ") for line in output.splitlines() if line.startswith("Run: ")
+    )
+    restored = InvestigationStore(StateDatabase(database_path)).get(investigation_id)
+
+    assert exit_code == 0
+    assert restored is not None
+    assert restored.report is not None
+    assert restored.report.verdict.safe_to_review is True
 
 
 def test_investigate_rejects_unpinned_revision(

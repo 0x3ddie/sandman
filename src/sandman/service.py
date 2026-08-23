@@ -15,25 +15,47 @@ from sandman.models import (
     RuntimeName,
 )
 from sandman.runtime import SandboxRuntime
+from sandman.state import StateDatabase
+
+_INVESTIGATION_NAMESPACE = "investigation"
 
 
 class InvestigationStore:
-    def __init__(self) -> None:
+    def __init__(self, database: StateDatabase | None = None) -> None:
         self._records: dict[str, InvestigationRecord] = {}
+        self._database = database
 
     def create(self) -> InvestigationRecord:
         investigation_id = uuid4().hex
         record = InvestigationRecord(investigation_id=investigation_id, state=RunState.QUEUED)
         self._records[investigation_id] = record
+        self._persist(record)
         return record
 
     def get(self, investigation_id: str) -> InvestigationRecord | None:
-        return self._records.get(investigation_id)
+        record = self._records.get(investigation_id)
+        if record is not None or self._database is None:
+            return record
+        payload = self._database.load(_INVESTIGATION_NAMESPACE, investigation_id)
+        if payload is None:
+            return None
+        record = InvestigationRecord.model_validate_json(payload)
+        self._records[investigation_id] = record
+        return record
 
     def update(self, record: InvestigationRecord) -> None:
         if record.investigation_id not in self._records:
             raise KeyError(record.investigation_id)
         self._records[record.investigation_id] = record
+        self._persist(record)
+
+    def _persist(self, record: InvestigationRecord) -> None:
+        if self._database is not None:
+            self._database.save(
+                _INVESTIGATION_NAMESPACE,
+                record.investigation_id,
+                record.model_dump_json(),
+            )
 
 
 class InvestigationService:

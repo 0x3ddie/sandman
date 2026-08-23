@@ -21,6 +21,7 @@ release; Sandman produces pre-rollout evidence in isolated, production-fidelity 
 - Validation that rejects credentials in repository URLs and sensitive probe headers
 - Sanitized incident-to-hotfix generation with the local Codex CLI
 - Explicit candidate-branch publication followed by three-lane verification
+- Optional shared SQLite state for restart-safe investigations and hotfix artifacts
 
 ## Run locally
 
@@ -60,6 +61,11 @@ three `REF@SHA` values through `workflow_dispatch` or `workflow_call`. Configure
 `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` as GitHub Actions secrets. The workflow posts a
 GitHub Check on the candidate commit and creates a draft PR only for a verified candidate;
 the evidence-rich PR body requests Greptile review automatically.
+
+For a restart-safe local control plane, set
+`SANDMAN_STATE_DATABASE=.sandman/state.db`. The API and CLI share the same SQLite record
+format; `sandman investigate` also accepts `--state-database`. GitHub Actions can stay
+ephemeral because the published Check and draft PR are the durable CI record.
 
 ## Run the checks
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 import httpx
 
 from sandman.api import create_app
+from sandman.config import Settings
 from sandman.remediation import (
     BranchPublication,
     BranchPublisher,
@@ -89,6 +91,37 @@ async def test_demo_investigation_completes() -> None:
         assert record is not None
         assert record["state"] == "completed"
         assert record["report"]["verdict"]["kind"] == "candidate_verified"
+
+
+async def test_investigation_survives_app_restart(tmp_path: Path) -> None:
+    settings = Settings(state_database_path=tmp_path / "sandman.db")
+    transport = httpx.ASGITransport(app=create_app(settings=settings))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/investigations",
+            json={
+                "repository_url": "https://example.com/repo.git",
+                "revisions": [
+                    {"lane": "known_good", "git_ref": "v1", "label": "Known good"},
+                    {"lane": "current", "git_ref": "main", "label": "Current"},
+                    {"lane": "candidate", "git_ref": "fix", "label": "Candidate"},
+                ],
+                "runtime": "demo",
+                "probe": {"method": "GET", "path": "/health", "expected_status": 200},
+            },
+        )
+        investigation_id = response.json()["investigation_id"]
+        completed = await wait_until_complete(client, investigation_id)
+        assert completed["state"] == "completed"
+
+    restarted_transport = httpx.ASGITransport(app=create_app(settings=settings))
+    async with httpx.AsyncClient(
+        transport=restarted_transport, base_url="http://test"
+    ) as restarted_client:
+        restored = await restarted_client.get(f"/api/investigations/{investigation_id}")
+
+    assert restored.status_code == 200
+    assert restored.json()["report"]["verdict"]["kind"] == "candidate_verified"
 
 
 async def test_pull_request_requires_configured_token() -> None:

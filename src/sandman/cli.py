@@ -21,6 +21,7 @@ from sandman.models import InvestigationReport, Lane, Revision, RuntimeName
 from sandman.project import load_project_config
 from sandman.runtime import DemoSandboxRuntime, ModalSandboxRuntime
 from sandman.service import InvestigationService, InvestigationStore
+from sandman.state import StateDatabase
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -83,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     investigate.add_argument("--pr-base", help="PR base branch; defaults to the current ref")
     investigate.add_argument("--pr-title", help="draft PR title")
+    investigate.add_argument(
+        "--state-database",
+        type=Path,
+        help="persist the run to this SQLite database",
+    )
     return parser
 
 
@@ -115,7 +121,10 @@ def _investigate(arguments: argparse.Namespace, stdout: TextIO, stderr: TextIO) 
         print(f"sandman: {error}", file=stderr)
         return 2
 
-    store = InvestigationStore()
+    database_path = arguments.state_database
+    if database_path is None and (environment_path := os.getenv("SANDMAN_STATE_DATABASE")):
+        database_path = Path(environment_path)
+    store = InvestigationStore(StateDatabase(database_path) if database_path else None)
     sandbox_runtime = (
         DemoSandboxRuntime()
         if runtime is RuntimeName.DEMO
@@ -153,6 +162,7 @@ def _parse_revision(lane: Lane, value: str, label: str) -> Revision:
 
 def _print_report(report: InvestigationReport, stdout: TextIO) -> None:
     print(f"Sandman · {report.verdict.headline}", file=stdout)
+    print(f"Run: {report.investigation_id}", file=stdout)
     for result in report.results:
         observation = result.observation
         marker = "PASS" if observation.passed else "FAIL"

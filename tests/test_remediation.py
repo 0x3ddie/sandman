@@ -14,11 +14,13 @@ from sandman.remediation import (
     HotfixRecord,
     HotfixRecordState,
     HotfixRequest,
+    HotfixStore,
     HotfixVerificationRequest,
     IncidentTrace,
     TraceResponse,
     build_hotfix_prompt,
 )
+from sandman.state import StateDatabase
 
 BASE_SHA = "a" * 40
 CANDIDATE_SHA = "b" * 40
@@ -156,6 +158,20 @@ def test_verification_uses_published_candidate_and_trace_contract() -> None:
     assert investigation.revisions[2].commit_sha == CANDIDATE_SHA
     assert investigation.probe.path == "/api/checkout/quote"
     assert investigation.probe.expected_json == {"currency": "USD"}
+
+
+def test_hotfix_store_survives_restart(tmp_path: Path) -> None:
+    database_path = tmp_path / "sandman.db"
+    store = HotfixStore(StateDatabase(database_path))
+    record = store.create(hotfix_request())
+    failed = record.model_copy(
+        update={"state": HotfixRecordState.FAILED, "error": "bounded failure"}
+    )
+    store.update(failed)
+
+    restored = HotfixStore(StateDatabase(database_path)).get(record.hotfix_id)
+
+    assert restored == failed
 
 
 def initialize_repository(path: Path) -> None:
