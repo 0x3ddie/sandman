@@ -55,6 +55,12 @@ Use `--json` for GitHub Actions or another automation consumer. The command retu
 only when the candidate is verified as safe to review, one for a completed but unsafe
 verdict, and two for configuration or execution failure.
 
+The included `Sandman production verification` workflow accepts the same named probe and
+three `REF@SHA` values through `workflow_dispatch` or `workflow_call`. Configure
+`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` as GitHub Actions secrets. The workflow posts a
+GitHub Check on the candidate commit and creates a draft PR only for a verified candidate;
+the evidence-rich PR body requests Greptile review automatically.
+
 ## Run the checks
 
 ```bash

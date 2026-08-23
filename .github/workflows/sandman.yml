@@ -1,0 +1,80 @@
+name: Sandman production verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: Named probe from .sandman.toml
+        required: true
+        type: string
+      known_good:
+        description: Known-good revision as REF@SHA
+        required: true
+        type: string
+      current:
+        description: Current revision as REF@SHA
+        required: true
+        type: string
+      candidate:
+        description: Candidate revision as REF@SHA
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      probe:
+        required: true
+        type: string
+      known_good:
+        required: true
+        type: string
+      current:
+        required: true
+        type: string
+      candidate:
+        required: true
+        type: string
+    secrets:
+      MODAL_TOKEN_ID:
+        required: true
+      MODAL_TOKEN_SECRET:
+        required: true
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      SANDMAN_PROBE: ${{ inputs.probe }}
+      SANDMAN_KNOWN_GOOD: ${{ inputs.known_good }}
+      SANDMAN_CURRENT: ${{ inputs.current }}
+      SANDMAN_CANDIDATE: ${{ inputs.candidate }}
+    steps:
+      - name: Check out Sandman
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.1"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Verify candidate and create review handoff
+        run: >-
+          uv run sandman investigate
+          --probe "$SANDMAN_PROBE"
+          --known-good "$SANDMAN_KNOWN_GOOD"
+          --current "$SANDMAN_CURRENT"
+          --candidate "$SANDMAN_CANDIDATE"
+          --github-check
+          --create-pr

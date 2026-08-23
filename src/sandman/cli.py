@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,6 +11,12 @@ from typing import TextIO
 import uvicorn
 from pydantic import ValidationError
 
+from sandman.github import (
+    GitHubCheckPublisher,
+    GitHubPullRequestPublisher,
+    PullRequestRequest,
+    github_repository_from_url,
+)
 from sandman.models import InvestigationReport, Lane, Revision, RuntimeName
 from sandman.project import load_project_config
 from sandman.runtime import DemoSandboxRuntime, ModalSandboxRuntime
@@ -66,6 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     investigate.add_argument("--runtime", choices=tuple(RuntimeName), default=None)
     investigate.add_argument("--json", action="store_true", dest="json_output")
+    investigate.add_argument(
+        "--github-check", action="store_true", help="publish the verdict as a GitHub Check"
+    )
+    investigate.add_argument(
+        "--create-pr",
+        action="store_true",
+        help="create a verified draft PR and request Greptile review",
+    )
+    investigate.add_argument("--pr-base", help="PR base branch; defaults to the current ref")
+    investigate.add_argument("--pr-title", help="draft PR title")
     return parser
 
 
@@ -116,6 +133,11 @@ def _investigate(arguments: argparse.Namespace, stdout: TextIO, stderr: TextIO) 
         print(completed.model_dump_json(indent=2), file=stdout)
     else:
         _print_report(completed.report, stdout)
+    try:
+        _publish_github_outputs(arguments, completed.report, stdout)
+    except (RuntimeError, ValueError) as error:
+        print(f"sandman: {error}", file=stderr)
+        return 2
     return 0 if completed.report.verdict.safe_to_review else 1
 
 
@@ -142,3 +164,44 @@ def _print_report(report: InvestigationReport, stdout: TextIO) -> None:
         )
     print(f"Verdict: {report.verdict.kind.value}", file=stdout)
     print(report.verdict.detail, file=stdout)
+
+
+def _publish_github_outputs(
+    arguments: argparse.Namespace,
+    report: InvestigationReport,
+    stdout: TextIO,
+) -> None:
+    if not arguments.github_check and not arguments.create_pr:
+        return
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise RuntimeError("GITHUB_TOKEN is required for GitHub reporting")
+    repository = github_repository_from_url(report.request.repository_url)
+    candidate = next(
+        revision for revision in report.request.revisions if revision.lane is Lane.CANDIDATE
+    )
+    current = next(
+        revision for revision in report.request.revisions if revision.lane is Lane.CURRENT
+    )
+    if candidate.commit_sha is None:
+        raise RuntimeError("candidate commit SHA is required for GitHub reporting")
+    if arguments.github_check:
+        check = GitHubCheckPublisher(token).create(repository, candidate.commit_sha, report)
+        print(f"GitHub Check: {check.url}", file=stdout)
+    if not arguments.create_pr:
+        return
+    if not report.verdict.safe_to_review:
+        print("Draft PR skipped: candidate is not verified", file=stdout)
+        return
+    pull_request = GitHubPullRequestPublisher(token).create(
+        PullRequestRequest(
+            owner=repository.owner,
+            repository=repository.repository,
+            head=candidate.git_ref,
+            base=arguments.pr_base or current.git_ref,
+            title=arguments.pr_title or f"fix: {report.verdict.headline.lower()}",
+            draft=True,
+        ),
+        report,
+    )
+    print(f"Draft PR: {pull_request.url}", file=stdout)
