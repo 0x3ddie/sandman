@@ -1,0 +1,356 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   sandman design tokens — "sodium lamp at night"
+
+   Dark only, deliberately. Every premium reference in this category is
+   dark-first, and one theme executed precisely reads as more confident than
+   two executed adequately.
+
+   The load-bearing decision is the variant triad. This product is a three-way
+   diff, so the three variant colours appear in the hero, the run list, the
+   waterfall, the fan-out grid, and the diff view. Steel / sky / sodium is the
+   maximally colour-vision-deficiency-safe three-way triad — unlike the
+   red/green/amber a naive implementation would reach for, it stays
+   distinguishable under deuteranopia, protanopia, and tritanopia.
+
+   Because the brand accent is amber, amber is REMOVED from the semantic set.
+   "Running" owns the accent instead, so nobody ever reads amber as "warning".
+   ========================================================================== */
+
+:root {
+  /* -- surfaces: a six-step ladder, not two ------------------------------ */
+  --bg-void: #07070b;      /* behind the marketing hero */
+  --bg-base: #0b0b11;      /* app canvas */
+  --bg-surface: #101017;   /* cards, panels */
+  --bg-raised: #16161f;    /* row hover, inputs */
+  --bg-overlay: #1c1c27;   /* popovers, menus, modals */
+  --bg-inset: #050509;     /* log wells — deeper than base is what makes a
+                              terminal read as a well */
+
+  /* -- text -------------------------------------------------------------- */
+  --fg-primary: #ecedf2;   /* 15.1:1 on base. Never pure #fff: it halates on OLED */
+  --fg-secondary: #a6a8b8; /* 8.2:1 */
+  --fg-tertiary: #71737f;  /* 4.4:1 — 13px and above only */
+  --fg-quaternary: #4a4c58;/* 2.4:1 — decorative and disabled ONLY, never body text */
+
+  /* -- accent: sodium amber ---------------------------------------------- */
+  --accent-100: #ffe4bf;
+  --accent-200: #ffd196;
+  --accent-300: #ffc271;
+  --accent-400: #ffb454;   /* 10.9:1 both directions — black-on-amber is AAA */
+  --accent-500: #f79e32;
+  --accent-600: #d97e1c;
+  --accent-wash: rgb(255 180 84 / 0.10);
+  --accent-border: rgb(255 180 84 / 0.32);
+
+  /* -- variants: CVD-safe steel / sky / sodium --------------------------- */
+  --variant-baseline: #8a93a8;
+  --variant-baseline-wash: rgb(138 147 168 / 0.10);
+  --variant-baseline-border: rgb(138 147 168 / 0.28);
+  --variant-initial: #5aa9f5;
+  --variant-initial-wash: rgb(90 169 245 / 0.10);
+  --variant-initial-border: rgb(90 169 245 / 0.28);
+  --variant-hotfix: #ffb454;
+  --variant-hotfix-wash: rgb(255 180 84 / 0.10);
+  --variant-hotfix-border: rgb(255 180 84 / 0.28);
+
+  /* -- status: note the absence of amber --------------------------------- */
+  --status-pass: #3fd68c;
+  --status-fail: #ff5f6d;
+  --status-flaky: #a78bfa;
+  --status-running: #ffb454;   /* the brand colour means "work is happening" */
+  --status-queued: #6e7080;
+  --status-provisioning: #5aa9f5;
+  --status-skipped: #4a4c58;
+  --status-pass-wash: rgb(63 214 140 / 0.10);
+  --status-fail-wash: rgb(255 95 109 / 0.10);
+  --status-flaky-wash: rgb(167 139 250 / 0.10);
+  --status-running-wash: rgb(255 180 84 / 0.10);
+  --status-queued-wash: rgb(110 112 128 / 0.10);
+  --status-provisioning-wash: rgb(90 169 245 / 0.10);
+
+  /* -- borders: alpha so they compose over any surface ------------------- */
+  --border-hairline: rgb(255 255 255 / 0.04);
+  --border-subtle: rgb(255 255 255 / 0.07);
+  --border-default: rgb(255 255 255 / 0.10);
+  --border-strong: rgb(255 255 255 / 0.16);
+
+  /* -- radii: four in use is a system, seven is noise -------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;   /* buttons, inputs, pills — the default */
+  --radius-md: 8px;   /* cards */
+  --radius-lg: 10px;  /* panels, modals */
+  --radius-xl: 14px;  /* the hero product frame, and nothing else */
+
+  /* -- elevation: on dark, depth comes from the surface ladder plus an
+        inset highlight, not from drop shadows ---------------------------- */
+  --elev-1: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  --elev-2: 0 1px 2px rgb(0 0 0 / 0.6), 0 8px 24px -8px rgb(0 0 0 / 0.8),
+    inset 0 1px 0 rgb(255 255 255 / 0.05);
+  --elev-3: 0 16px 48px -12px rgb(0 0 0 / 0.85), inset 0 0 0 1px rgb(255 255 255 / 0.08);
+  --glow-accent: 0 0 0 1px rgb(255 180 84 / 0.30), 0 0 24px -4px rgb(255 180 84 / 0.35);
+  --focus-ring: 0 0 0 1px var(--bg-base), 0 0 0 3px rgb(255 180 84 / 0.55);
+
+  /* -- motion: nothing springs, nothing exceeds 400ms -------------------- */
+  --dur-micro: 80ms;
+  --dur-fast: 140ms;
+  --dur-normal: 220ms;
+  --dur-enter: 340ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --grid-line: rgb(255 255 255 / 0.022);
+}
+
+/* Map tokens onto Tailwind utilities so there is one source of truth. */
+@theme inline {
+  --color-void: var(--bg-void);
+  --color-base: var(--bg-base);
+  --color-surface: var(--bg-surface);
+  --color-raised: var(--bg-raised);
+  --color-overlay: var(--bg-overlay);
+  --color-inset: var(--bg-inset);
+
+  --color-fg: var(--fg-primary);
+  --color-fg-2: var(--fg-secondary);
+  --color-fg-3: var(--fg-tertiary);
+  --color-fg-4: var(--fg-quaternary);
+
+  --color-accent: var(--accent-400);
+  --color-accent-300: var(--accent-300);
+  --color-accent-500: var(--accent-500);
+  --color-accent-wash: var(--accent-wash);
+
+  --color-baseline: var(--variant-baseline);
+  --color-initial: var(--variant-initial);
+  --color-hotfix: var(--variant-hotfix);
+
+  --color-pass: var(--status-pass);
+  --color-fail: var(--status-fail);
+  --color-flaky: var(--status-flaky);
+  --color-running: var(--status-running);
+  --color-queued: var(--status-queued);
+  --color-provisioning: var(--status-provisioning);
+
+  --color-hairline: var(--border-hairline);
+  --color-subtle: var(--border-subtle);
+
+  --font-sans: var(--font-instrument-sans), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  --font-serif: var(--font-instrument-serif), Georgia, serif;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+* {
+  border-color: var(--border-subtle);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  /* Explicit background: the viewport paints its own ground behind the page,
+     so a transparent body borrows the host's theme. */
+  background-color: var(--bg-base);
+  color: var(--fg-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Kill the default focus ring and replace it globally — the stock
+   ring-2 ring-ring/50 is the single most recognisable component-library tell. */
+*:focus {
+  outline: none;
+}
+
+*:focus-visible {
+  outline: 1px solid var(--accent-400);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: var(--accent-wash);
+  color: var(--accent-200);
+}
+
+/* Durations and costs tick during a live run; without tabular figures every
+   row visibly jitters. */
+.mono,
+code,
+kbd,
+pre,
+samp,
+[data-numeric] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   Type scale
+   ========================================================================== */
+
+.text-display-1 {
+  font-size: clamp(44px, 7vw, 76px);
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+  font-weight: 600;
+  font-stretch: 92%; /* free distinctiveness from Instrument Sans's width axis */
+}
+
+.text-display-2 {
+  font-size: clamp(32px, 5vw, 56px);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+  font-stretch: 95%;
+}
+
+.text-h1 { font-size: 40px; line-height: 1.1; letter-spacing: -0.025em; font-weight: 600; }
+.text-h2 { font-size: 30px; line-height: 1.15; letter-spacing: -0.02em; font-weight: 600; }
+.text-h3 { font-size: 22px; line-height: 1.25; letter-spacing: -0.015em; font-weight: 600; }
+.text-h4 { font-size: 17px; line-height: 1.35; letter-spacing: -0.01em; font-weight: 600; }
+
+/* Marketing prose gets 1.6 leading, app UI gets 1.5. The difference is
+   intentional: it is what makes the app feel denser than the site. */
+.text-body-lg { font-size: 18px; line-height: 1.6; letter-spacing: -0.011em; }
+.text-body-sm { font-size: 13.5px; line-height: 1.5; }
+.text-label { font-size: 13px; line-height: 1.3; letter-spacing: -0.005em; font-weight: 500; }
+.text-caption { font-size: 12px; line-height: 1.35; font-weight: 500; }
+
+.text-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.text-code { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; }
+.text-metric {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.font-serif-italic {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 400;
+}
+
+/* ==========================================================================
+   Signature visuals
+   ========================================================================== */
+
+/* Grain — the brand pun: sandman, sand. Kept under 3% and never animated. */
+.grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.025;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Grain degrades small mono text, so it is disabled inside log and diff panes. */
+.no-grain::after {
+  display: none;
+}
+
+.sodium-glow {
+  position: absolute;
+  inset-inline: 0;
+  top: -120px;
+  height: 520px;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 900px 420px at 50% 0%, rgb(255 180 84 / 0.13) 0%,
+      rgb(255 180 84 / 0.05) 38%, transparent 70%),
+    radial-gradient(ellipse 1200px 500px at 50% -10%, rgb(90 169 245 / 0.06), transparent 65%);
+}
+
+/* Hairline instrument grid. Reusing it behind the fan-out grid in-app is what
+   ties the marketing site to the product. */
+.instrument-grid {
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 64px 64px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 20%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 20%, transparent 75%);
+}
+
+/* Scanline sweep communicates live-ness without a spinner. */
+@keyframes sweep {
+  0% { top: 0; opacity: 0; }
+  10% { opacity: 0.7; }
+  90% { opacity: 0.7; }
+  100% { top: 100%; opacity: 0; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .is-running::before {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent-400), transparent);
+    animation: sweep 2.4s var(--ease-standard) infinite;
+    pointer-events: none;
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.6s var(--ease-standard) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   Scrollbars
+   ========================================================================== */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--border-strong); background-clip: content-box; }

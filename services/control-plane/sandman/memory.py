@@ -1,51 +1,56 @@
-"""cmem.ai persistent agent memory, mediated entirely by the control plane.
+"""cmem.ai persistent agent memory, read and written only by the control plane.
 
 ARCHITECTURAL CONSTRAINT -- memory is ORCHESTRATOR-MEDIATED.
 The claude-mem worker listens on ``127.0.0.1``. Modal sandboxes are remote
 machines and cannot reach the control plane's loopback interface, so a sandboxed
-agent can never talk to memory directly. Sandboxed agents return findings *to*
-the control plane, and only the control plane reads and writes memory. A memory
-URL or token is never handed to a sandbox, never placed in a variant's env, and
-never embedded in a probe payload.
+agent can never talk to memory directly, and giving one a memory URL or token
+would be both useless and a credential leak. Sandboxed agents return findings
+*to* the control plane; only the control plane reads and writes memory. Nothing
+in this module is ever placed in a variant's env, a probe payload, or a patch
+workspace.
 
-Memory is an *enhancement*, never a hard dependency. Every public method degrades
-to an empty result when the worker is absent, unhealthy, or running a build that
-does not expose an endpoint. A run must complete identically with the worker
-switched off; the only difference is that findings arrive without the historical
-context that would have told an operator "this exact failure was fixed last
-Tuesday by widening a timeout".
+Memory is an enhancement, never a hard dependency. Every public method degrades
+to an empty result when the worker is absent, unhealthy, disabled by settings,
+or running a build that does not expose an endpoint. A run must complete
+identically with the worker switched off; the only thing lost is the historical
+context that tells an operator "this exact failure was fixed last Tuesday by
+widening a timeout".
 
-Endpoint shapes were verified against a live worker (v13.15.3) and this module
-adapts to what the worker actually accepts rather than assuming one build:
+Endpoint shapes were verified against a live worker (13.15.3), and this module
+adapts to what a worker actually accepts rather than assuming one build:
 
-* Writes prefer ``POST /api/memory/save`` (``{text,title,project,metadata}`` ->
-  ``{success,id,...}``), which is the only write that returns a durable id
-  synchronously. ``POST /api/sessions/observations`` is the documented
-  alternative and is used as a fallback; it answers ``{"status":"queued"}`` and
-  routes the payload through asynchronous LLM compression, so it yields no id.
+* ``POST /api/memory/save`` (``{text,title,project,metadata}`` ->
+  ``{success,id,...}``) is the only write that returns a durable id
+  synchronously, so it is preferred. ``POST /api/sessions/observations`` is the
+  documented alternative and is used as a fallback; it requires
+  ``contentSessionId`` + ``tool_name``, answers ``{"status":"queued"}`` and
+  routes the payload through asynchronous compression, so it yields no id.
 * ``POST /api/observations/batch`` is a *read-by-ids* endpoint on this build
-  (``{ids:[...]}`` -> a JSON array of records). :meth:`MemoryClient.record_batch`
-  probes the batch-write shape once, then falls back to bounded-concurrency
-  single writes, and reuses ``batch`` for hydration where it is genuinely useful.
-* Search endpoints answer in MCP envelope form -- ``{"content":[{"type":"text",
-  "text":"<markdown table>"}]}`` -- which carries ids and titles but not bodies.
-  Recall therefore extracts the ids and hydrates full records through the batch
-  read. ``POST /api/context/semantic`` reads its query from ``q`` (not
-  ``query``) and returns a prose blob, which is parsed back into sections.
-* Search rejects an empty request with ``INVALID_SEARCH_REQUEST``; a query or a
-  filter is always sent.
+  (``{ids:[...]}`` -> a JSON array of full records). The batch *write* shape is
+  probed once per client; when it is rejected, writes fall back to
+  bounded-concurrency single saves, and the batch read is reused to hydrate
+  recall results.
+* Search (``/api/search``, ``/api/search/observations``, ``/api/timeline``) is
+  POST on some builds and GET on this one; each call tries POST and falls back
+  to GET on 404/405. Responses come back in MCP envelope form --
+  ``{"content":[{"type":"text","text":"<markdown table>"}]}`` -- which carries
+  ids but not bodies, so ids are extracted and hydrated through the batch read.
+* An empty search request is rejected with ``INVALID_SEARCH_REQUEST``; a query
+  or a filter is therefore always sent.
+* Worker metadata is stored but not full-text indexed, so scope tags are also
+  written as a trailing line of the narrative, which *is* indexed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import random
 import re
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from types import TracebackType
@@ -59,40 +64,47 @@ from .models import Finding, Variant
 
 logger = logging.getLogger(__name__)
 
-__all__ = [
-    "MemoryClient",
-    "MemoryScope",
-    "MemoryUnavailable",
-    "Recollection",
-]
+#: Health verdicts are cached this long. Long enough that a burst of recalls
+#: costs one probe, short enough that a worker started mid-run is picked up.
+_HEALTH_TTL_S = 30.0
+
+_MAX_NARRATIVE_CHARS = 4000
+_MAX_TITLE_CHARS = 120
+_MAX_REPRO_CHARS = 800
+_WRITE_CONCURRENCY = 4
+
+_TAG_LINE_PREFIX = "sandman-tags:"
 
 
 class MemoryUnavailable(RuntimeError):
-    """The memory worker is absent, unhealthy, or disabled by configuration.
+    """Raised only by :meth:`MemoryClient.require_available`.
 
-    Public methods never raise this: they degrade to an empty result. It exists
-    for callers that deliberately opt into a hard failure (a backfill job, a
-    diagnostic command) via :meth:`MemoryClient.require_available`.
+    The ordinary read/write methods never raise this: memory is an enhancement
+    and a missing worker must not fail a run. Callers that genuinely cannot
+    proceed without memory ask for it explicitly.
     """
+
+    def __init__(self, base_url: str, reason: str = "worker did not answer /api/health") -> None:
+        super().__init__(f"memory worker at {base_url} is unavailable: {reason}")
+        self.base_url = base_url
+        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
 # Redaction
 # ---------------------------------------------------------------------------
 
-# Applied to every string this module logs or embeds in an exception. The memory
-# worker is local and unauthenticated, but findings, reproductions and error
-# bodies are attacker-influenced text from a probed application, and a leaked
-# token must not survive into a durable memory record or a log line.
+# Anything matching these is replaced before it can reach a narrative, a log
+# line, or an exception message. Memory records are long-lived and are re-read
+# by later runs, so a credential written once leaks forever.
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"\bsk-[A-Za-z0-9._\-]{16,}"),
-    re.compile(r"\bak-[A-Za-z0-9._\-]{16,}"),
-    re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
-    re.compile(r"(?i)\b(?:bearer|token|basic)\s+[A-Za-z0-9._\-+/=]{12,}"),
-    re.compile(r"(?i)\b(?:api[_-]?key|secret|password|passwd|authorization)\b\s*[=:]\s*\S+"),
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgh[opsu]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bxox[abpsr]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b"),
+    re.compile(r"(?i)\b(?:bearer|token|api[_-]?key|secret|password)\b\s*[:=]?\s*[^\s,;\"']{8,}"),
     re.compile(r"(?i)://[^/\s:@]+:[^/\s@]+@"),
 )
 
@@ -100,11 +112,15 @@ _REDACTED = "[redacted]"
 
 
 def redact(value: str) -> str:
-    """Strip anything token-shaped. Used on every logged or persisted string."""
+    """Mask anything that looks like a credential."""
     out = value
     for pattern in _SECRET_PATTERNS:
         out = pattern.sub(_REDACTED, out)
     return out
+
+
+def _redact_exc(exc: BaseException) -> str:
+    return redact(f"{type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -112,35 +128,18 @@ def redact(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 _SLUG_RE = re.compile(r"[^a-z0-9._-]+")
-_TAG_LINE_PREFIX = "sandman-tags:"
-_TAG_LINE_RE = re.compile(rf"{_TAG_LINE_PREFIX}\s*(?P<tags>[^\n\]]+)")
-
-#: Narrative and evidence caps. The worker stores narratives verbatim and a
-#: multi-megabyte probe log would both bloat the store and drown the embedding.
-_MAX_NARRATIVE_CHARS = 8_000
-_MAX_REPRO_CHARS = 900
-_MAX_EVIDENCE_CHARS = 320
-_MAX_TITLE_CHARS = 120
-
-#: The worker clamps semantic limit to 1..20; clamping here keeps the request
-#: honest instead of silently receiving fewer rows than asked for.
-_SEMANTIC_LIMIT_MAX = 20
 
 
 def _slug(value: str, *, max_len: int = 64) -> str:
-    """Lowercase, punctuation-collapsed token safe to use inside a tag."""
-    slug = _SLUG_RE.sub("-", value.strip().lower()).strip("-.")
-    return slug[:max_len] or "unknown"
+    return _SLUG_RE.sub("-", value.strip().lower()).strip("-")[:max_len] or "unknown"
 
 
 class MemoryScope(BaseModel):
-    """Where a recollection belongs, and which lane produced it.
+    """Where a recollection belongs.
 
-    Scoping is what keeps baseline and hotfix recollections from
-    cross-contaminating. A fix recorded against the hotfix lane must never be
-    recalled as evidence about baseline behaviour: the two lanes are different
-    revisions of the code, and conflating them would let the agent "remember" a
-    fix for a bug that only ever existed in the other lane.
+    Scoping is what keeps a baseline lane's recollections from contaminating a
+    hotfix lane's: the two variants deliberately run *different* code, so a fix
+    recalled from the wrong variant is worse than no recollection at all.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -152,11 +151,10 @@ class MemoryScope(BaseModel):
     probe_id: str | None = None
 
     def tags(self) -> list[str]:
-        """Stable, ordered scope tags.
+        """Stable scope tags, coarsest first.
 
-        Order is deterministic so that two scopes with the same fields always
-        produce a byte-identical tag line, which is what makes tag matching on
-        recall reliable.
+        Order is fixed rather than sorted so that a stored tag line renders the
+        same way for every record and stays diff-friendly across runs.
         """
         tags = [
             "sandman",
@@ -166,7 +164,7 @@ class MemoryScope(BaseModel):
         if self.variant is not None:
             tags.append(f"sandman:variant:{self.variant.value}")
         if self.region:
-            tags.append(f"sandman:region:{_slug(self.region)}")
+            tags.append(f"sandman:region:{_slug(self.region, max_len=32)}")
         if self.probe_id:
             tags.append(f"sandman:probe:{_slug(self.probe_id)}")
         return tags
@@ -174,22 +172,20 @@ class MemoryScope(BaseModel):
     def with_probe(self, probe_id: str) -> MemoryScope:
         return self.model_copy(update={"probe_id": probe_id})
 
+    def with_variant(self, variant: Variant) -> MemoryScope:
+        return self.model_copy(update={"variant": variant})
+
 
 def _tag_line(tags: Sequence[str]) -> str:
-    """Machine-readable tag footer embedded in the narrative body.
-
-    Required, not decorative: the worker stores ``metadata`` in a column that its
-    list and search responses do not return, so tags written only to metadata are
-    unreadable on recall. The narrative always survives the round trip.
-    """
-    return f"[{_TAG_LINE_PREFIX} {' '.join(tags)}]"
+    return f"{_TAG_LINE_PREFIX} {' '.join(tags)}"
 
 
 def _parse_tag_line(text: str) -> list[str]:
-    match = _TAG_LINE_RE.search(text)
-    if not match:
-        return []
-    return [tok for tok in match.group("tags").split() if tok.startswith("sandman")]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_TAG_LINE_PREFIX):
+            return [tag for tag in stripped[len(_TAG_LINE_PREFIX) :].split() if tag]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +194,7 @@ def _parse_tag_line(text: str) -> list[str]:
 
 
 class Recollection(BaseModel):
-    """One remembered observation, normalized across every recall endpoint."""
+    """One remembered record, normalised across the worker's response shapes."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -207,9 +203,6 @@ class Recollection(BaseModel):
     text: str
     created_at: datetime
     score: float | None = None
-    """Backend relevance when the endpoint supplies one, otherwise a
-    rank-derived value in ``(0, 1]`` so callers can always sort consistently."""
-
     tags: list[str] = Field(default_factory=list)
 
     @property
@@ -220,6 +213,15 @@ class Recollection(BaseModel):
     def probe_id(self) -> str | None:
         return self._tag_value("sandman:probe:")
 
+    @property
+    def kind(self) -> str | None:
+        """``finding`` or ``hotfix`` when the record carries a kind tag."""
+        return self._tag_value("sandman:kind:")
+
+    @property
+    def verified(self) -> bool:
+        return "sandman:verified:true" in self.tags
+
     def _tag_value(self, prefix: str) -> str | None:
         for tag in self.tags:
             if tag.startswith(prefix):
@@ -227,19 +229,78 @@ class Recollection(BaseModel):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Response plumbing
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Reply:
+    """A completed HTTP exchange. ``payload`` is ``None`` for non-JSON bodies."""
+
+    status: int
+    payload: Any
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status < 300
+
+    @property
+    def missing_route(self) -> bool:
+        return self.status in (404, 405, 501)
+
+
+def _decode(response: httpx.Response) -> Any:
+    content_type = response.headers.get("content-type", "")
+    if "json" not in content_type:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _backoff(attempt: int) -> float:
+    return min(4.0, 0.25 * 2.0 ** (attempt - 1)) + random.uniform(0.0, 0.15)
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Honour ``Retry-After`` in either of its two legal encodings."""
+    header = response.headers.get("retry-after")
+    if header:
+        try:
+            return max(0.0, min(30.0, float(header)))
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(header)
+        except (TypeError, ValueError):
+            when = None
+        if when is not None:
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            return max(0.0, min(30.0, (when - datetime.now(UTC)).total_seconds()))
+    return _backoff(attempt)
+
+
+def _trim(value: str, limit: int) -> str:
+    value = value.strip()
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+
 def _coerce_datetime(value: Any) -> datetime:
-    """Best-effort timestamp from the several shapes the worker emits."""
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, (int, float)):
-        # created_at_epoch is milliseconds; plain epoch seconds also appear.
+        # The worker stores epoch milliseconds; anything smaller is seconds.
         seconds = float(value) / 1000.0 if value > 1e11 else float(value)
-        with contextlib.suppress(OverflowError, OSError, ValueError):
-            return datetime.fromtimestamp(seconds, tz=UTC)
-    if isinstance(value, str) and value.strip():
-        with contextlib.suppress(ValueError):
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.now(UTC)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     return datetime.now(UTC)
 
 
@@ -251,155 +312,200 @@ def _first_str(payload: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _record_to_recollection(
-    record: dict[str, Any], *, fallback_score: float
-) -> Recollection | None:
-    """Map a worker observation record onto a :class:`Recollection`."""
+def _tags_from_metadata(metadata: Any) -> list[str]:
+    """Metadata comes back as a JSON *string* from SQLite-backed builds."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            return []
+    if isinstance(metadata, dict):
+        raw = metadata.get("tags")
+        if isinstance(raw, list):
+            return [str(tag) for tag in raw]
+        if isinstance(raw, str):
+            return [tag for tag in raw.split() if tag]
+    return []
+
+
+def _record_to_recollection(record: dict[str, Any], score: float | None) -> Recollection | None:
     raw_id = record.get("id")
     if raw_id is None:
         return None
-    text = _first_str(record, "narrative", "text", "content", "body", "summary") or ""
-    title = _first_str(record, "title", "subtitle") or text[:_MAX_TITLE_CHARS] or f"#{raw_id}"
-
-    raw_score = record.get("score", record.get("relevance", record.get("distance")))
-    score = float(raw_score) if isinstance(raw_score, (int, float)) else fallback_score
-
-    tags = _parse_tag_line(text)
-    if not tags:
-        tags = _tags_from_metadata(record.get("metadata"))
-
+    text = _first_str(record, "narrative", "text", "content", "summary", "subtitle") or ""
+    tags = _tags_from_metadata(record.get("metadata")) or _parse_tag_line(text)
+    created = record.get("created_at") or record.get("created_at_epoch") or record.get("createdAt")
     return Recollection(
         id=str(raw_id),
-        title=redact(title.strip())[:_MAX_TITLE_CHARS],
-        text=redact(text.strip()),
-        created_at=_coerce_datetime(record.get("created_at_epoch") or record.get("created_at")),
+        title=_first_str(record, "title", "subtitle") or f"observation #{raw_id}",
+        text=text,
+        created_at=_coerce_datetime(created),
         score=score,
         tags=tags,
     )
 
 
-def _tags_from_metadata(metadata: Any) -> list[str]:
-    """Metadata arrives as either a dict or a JSON-encoded string column."""
-    if isinstance(metadata, str):
-        with contextlib.suppress(json.JSONDecodeError, ValueError):
-            metadata = json.loads(metadata)
-    if not isinstance(metadata, dict):
-        return []
-    raw = metadata.get("tags")
-    if isinstance(raw, list):
-        return [str(tag) for tag in raw if isinstance(tag, (str, int))]
-    if isinstance(raw, str):
-        return [tok for tok in raw.split() if tok]
-    return []
-
-
-# ---------------------------------------------------------------------------
-# Response envelope handling
-# ---------------------------------------------------------------------------
-
-_MCP_ID_ROW_RE = re.compile(r"^\|\s*#(\d+)\s*\|", re.MULTILINE)
-_MCP_ID_ANY_RE = re.compile(r"#(\d+)\b")
-_SEMANTIC_SECTION_RE = re.compile(
-    r"^###\s+(?P<title>.+?)(?:\s+\((?P<date>[\d-]{8,10})\))?\s*$", re.MULTILINE
-)
-_RESULT_KEYS: tuple[str, ...] = ("results", "observations", "items", "matches", "data", "hits")
+_MCP_ID_RE = re.compile(r"\|\s*#(\d+)\s*\|")
+_LOOSE_ID_RE = re.compile(r"#(\d+)")
+_SEMANTIC_SECTION_RE = re.compile(r"^###\s+(?P<title>.*?)(?:\s+\((?P<date>[^)]+)\))?$")
 
 
 def _mcp_text(payload: Any) -> str | None:
-    """Extract the text of an MCP-style ``{"content":[{"type":"text",...}]}``."""
+    """Pull the markdown blob out of an MCP ``{"content":[...]}`` envelope."""
     if not isinstance(payload, dict):
         return None
     content = payload.get("content")
     if not isinstance(content, list):
         return None
-    if payload.get("isError"):
-        return None
-    parts = [
-        block["text"]
-        for block in content
-        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    chunks = [
+        part["text"]
+        for part in content
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
     ]
-    return "\n".join(parts) if parts else None
+    return "\n".join(chunks) if chunks else None
 
 
 def _structured_records(payload: Any) -> list[dict[str, Any]] | None:
-    """Pull a list of records out of whichever envelope the build uses."""
+    """Some builds answer search with real records instead of an MCP envelope."""
     if isinstance(payload, list):
-        return [row for row in payload if isinstance(row, dict)]
-    if not isinstance(payload, dict):
-        return None
-    for key in _RESULT_KEYS:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return [row for row in value if isinstance(row, dict)]
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("items", "results", "observations", "records", "matches"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
     return None
 
 
-def _ids_from_mcp_text(text: str, limit: int) -> list[int]:
-    """Ids in the order the search ranked them, de-duplicated."""
-    matches = _MCP_ID_ROW_RE.findall(text) or _MCP_ID_ANY_RE.findall(text)
-    seen: list[int] = []
-    for raw in matches:
+def _ids_from_text(text: str, limit: int) -> list[int]:
+    found = _MCP_ID_RE.findall(text) or _LOOSE_ID_RE.findall(text)
+    ordered: list[int] = []
+    for raw in found:
         value = int(raw)
-        if value not in seen:
-            seen.append(value)
-        if len(seen) >= limit:
+        if value not in ordered:
+            ordered.append(value)
+        if len(ordered) >= limit:
             break
-    return seen
+    return ordered
 
 
 def _rank_score(index: int, total: int) -> float:
-    """Monotonic decreasing score derived from rank position.
+    """Positional relevance.
 
-    Used only when the backend returns no numeric relevance; it preserves the
-    backend's ordering without inventing a similarity number that looks measured.
+    The worker returns matches in relevance order but does not expose a numeric
+    score, so rank is turned into one monotonically. Scores are comparable
+    within a single call only.
     """
-    if total <= 0:
-        return 0.0
-    return round(1.0 - (index / (total + 1)), 4)
+    if total <= 1:
+        return 1.0
+    return round(1.0 - (index / total) * 0.6, 4)
+
+
+def _parse_semantic_context(context: str) -> list[Recollection]:
+    """``/api/context/semantic`` answers with prose, not records."""
+    sections: list[tuple[str, str | None, list[str]]] = []
+    title: str | None = None
+    date: str | None = None
+    body: list[str] = []
+    for line in context.splitlines():
+        match = _SEMANTIC_SECTION_RE.match(line.strip())
+        if match:
+            if title is not None:
+                sections.append((title, date, body))
+            title = match.group("title").strip()
+            date = match.group("date")
+            body = []
+        elif title is not None:
+            body.append(line)
+    if title is not None:
+        sections.append((title, date, body))
+
+    total = len(sections)
+    out: list[Recollection] = []
+    for index, (sect_title, sect_date, sect_body) in enumerate(sections):
+        text = "\n".join(sect_body).strip()
+        out.append(
+            Recollection(
+                id=f"semantic:{index}",
+                title=sect_title,
+                text=text,
+                created_at=_coerce_datetime(sect_date) if sect_date else datetime.now(UTC),
+                score=_rank_score(index, total),
+                tags=_parse_tag_line(text),
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Narratives
+# ---------------------------------------------------------------------------
+
+
+def _render_evidence(evidence: dict[Variant, str]) -> list[str]:
+    return [
+        f"  {variant.glyph} {variant.value}: {_trim(redact(evidence[variant]), 240)}"
+        for variant in sorted(evidence, key=lambda v: v.order)
+    ]
+
+
+def _finding_narrative(finding: Finding, scope: MemoryScope) -> tuple[str, str]:
+    tags = [
+        *scope.with_probe(finding.probe_id).tags(),
+        "sandman:kind:finding",
+        f"sandman:classification:{finding.classification.value}",
+        f"sandman:severity:{finding.severity.value}",
+    ]
+    lines = [
+        f"sandman finding in run {finding.run_id}",
+        f"probe: {finding.probe_id}",
+        f"classification: {finding.classification.value} (severity {finding.severity.value})",
+        f"rollout: {scope.rollout_id}",
+        "",
+        _trim(redact(finding.description), 1200),
+    ]
+    if finding.variant_evidence:
+        lines += ["", "variant evidence:", *_render_evidence(finding.variant_evidence)]
+    if finding.reproduction:
+        lines += ["", "reproduction:", _trim(redact(finding.reproduction), _MAX_REPRO_CHARS)]
+    lines += ["", _tag_line(tags)]
+
+    title = _trim(redact(f"[{finding.classification.value}] {finding.title}"), _MAX_TITLE_CHARS)
+    return title, _trim("\n".join(lines), _MAX_NARRATIVE_CHARS)
 
 
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
 
-_HEALTH_TTL_SECONDS = 30.0
-_MAX_ATTEMPTS = 3
-_BACKOFF_BASE_SECONDS = 0.25
-_BACKOFF_CAP_SECONDS = 4.0
-_RETRY_AFTER_CAP_SECONDS = 10.0
-_WRITE_CONCURRENCY = 4
-
 
 class MemoryClient:
     """Async client for the local claude-mem worker.
 
-    Never constructed inside a sandbox. The base URL is loopback-only and the
-    client is owned by the control plane process.
+    Every method is safe to call when the worker is missing: transport errors
+    are swallowed, logged once at debug, and reported as an empty result.
     """
 
     def __init__(self, settings: Settings, timeout_s: float = 5.0) -> None:
         self._settings = settings
-        self._base_url = settings.memory_base_url.rstrip("/")
-        self._timeout = httpx.Timeout(timeout_s, connect=min(timeout_s, 2.0))
+        self._base_url: str = str(settings.memory_base_url).rstrip("/")
+        self._enabled = settings.sandman_memory_enabled
+        self._timeout = httpx.Timeout(timeout_s, connect=min(2.0, timeout_s))
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
-
         self._health_lock = asyncio.Lock()
-        self._healthy: bool = False
-        self._health_checked_at: float = float("-inf")
-
-        # Endpoints this build does not expose; probed once, then skipped.
-        self._absent: set[str] = set()
-        # None until the batch-write shape has been probed on this worker.
-        self._batch_write_supported: bool | None = None
+        self._healthy: bool | None = None
+        self._health_checked_at = 0.0
+        self._batch_write_ok: bool | None = None
         self._logged: set[str] = set()
 
     @classmethod
     def from_env(cls, timeout_s: float = 5.0) -> Self:
         return cls(get_settings(), timeout_s=timeout_s)
 
-    # -- lifecycle ---------------------------------------------------------
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
     async def __aenter__(self) -> Self:
         return self
@@ -418,27 +524,30 @@ class MemoryClient:
                 await self._client.aclose()
                 self._client = None
 
+    # -- transport ---------------------------------------------------------
+
     async def _http(self) -> httpx.AsyncClient:
         async with self._client_lock:
             if self._client is None:
                 self._client = httpx.AsyncClient(
                     base_url=self._base_url,
                     timeout=self._timeout,
-                    headers={"content-type": "application/json"},
+                    limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+                    headers={"user-agent": "sandman-control-plane", "accept": "application/json"},
                     follow_redirects=False,
                 )
             return self._client
 
-    # -- logging -----------------------------------------------------------
-
     def _log_once(self, key: str, message: str, *args: object) -> None:
-        """Degradation is expected and must not spam the run log."""
+        """Debug-log a degradation once per client.
+
+        A worker that is down is down for the whole run; logging every call
+        would bury the run's real output in identical lines.
+        """
         if key in self._logged:
             return
         self._logged.add(key)
         logger.debug(message, *args)
-
-    # -- transport ---------------------------------------------------------
 
     async def _request(
         self,
@@ -447,176 +556,174 @@ class MemoryClient:
         *,
         json_body: dict[str, Any] | None = None,
         params: dict[str, str | int] | None = None,
-    ) -> Any | None:
-        """One bounded-retry request. Returns decoded JSON, or None on any failure.
-
-        Retries only 429 and 5xx, honouring ``Retry-After``. A 4xx other than 429
-        is a contract mismatch (wrong shape, unknown endpoint) and retrying it
-        would only burn wall-clock inside a run's budget.
-        """
-        if path in self._absent:
-            return None
-
+        attempts: int = 3,
+    ) -> _Reply | None:
+        """One bounded-retry exchange. ``None`` means the transport gave up."""
         client = await self._http()
-        last_reason = "unknown"
-
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 response = await client.request(method, path, json=json_body, params=params)
             except httpx.HTTPError as exc:
-                last_reason = f"{type(exc).__name__}: {redact(str(exc))}"
-                if attempt == _MAX_ATTEMPTS:
-                    break
+                if attempt == attempts:
+                    self._log_once(
+                        f"transport:{path}",
+                        "memory %s %s unreachable: %s",
+                        method,
+                        path,
+                        _redact_exc(exc),
+                    )
+                    return None
                 await asyncio.sleep(_backoff(attempt))
                 continue
 
-            status = response.status_code
-
-            if status in (404, 405, 501):
-                self._absent.add(path)
-                self._log_once(f"absent:{path}", "memory: %s not exposed by worker", path)
-                return None
-
-            if status == 429 or status >= 500:
-                last_reason = f"HTTP {status}"
-                if attempt == _MAX_ATTEMPTS:
-                    break
+            if response.status_code == 429 or 500 <= response.status_code < 600:
+                if attempt == attempts:
+                    self._log_once(
+                        f"status:{path}",
+                        "memory %s %s returned %s after %d attempts",
+                        method,
+                        path,
+                        response.status_code,
+                        attempts,
+                    )
+                    return _Reply(response.status_code, _decode(response))
                 await asyncio.sleep(_retry_delay(response, attempt))
                 continue
 
-            if status >= 400:
-                self._log_once(
-                    f"reject:{path}:{status}",
-                    "memory: %s rejected request (HTTP %s): %s",
-                    path,
-                    status,
-                    redact(response.text[:200]),
-                )
-                return None
-
-            return _decode(response)
-
-        self._log_once(f"fail:{path}", "memory: %s unreachable (%s)", path, last_reason)
+            return _Reply(response.status_code, _decode(response))
         return None
+
+    async def _post_or_get(
+        self,
+        path: str,
+        *,
+        body: dict[str, Any],
+        params: dict[str, str | int],
+    ) -> _Reply | None:
+        """Try the documented POST shape, fall back to the GET shape.
+
+        Search moved between verbs across worker builds; probing rather than
+        pinning one keeps recall working on both.
+        """
+        reply = await self._request("POST", path, json_body=body)
+        if reply is not None and reply.missing_route:
+            reply = await self._request("GET", path, params=params)
+        return reply
 
     # -- health ------------------------------------------------------------
 
     async def available(self) -> bool:
-        """Whether the worker is reachable and initialized. Cached for 30s."""
-        if not self._settings.sandman_memory_enabled:
+        """Whether the worker is reachable. Cached for 30 seconds."""
+        if not self._enabled:
             return False
-
+        now = time.monotonic()
         async with self._health_lock:
-            now = time.monotonic()
-            if now - self._health_checked_at < _HEALTH_TTL_SECONDS:
+            if self._healthy is not None and now - self._health_checked_at < _HEALTH_TTL_S:
                 return self._healthy
-
-            payload = await self._request("GET", "/api/health")
-            healthy = False
-            if isinstance(payload, dict):
-                status = payload.get("status")
-                healthy = (
-                    status in (None, "ok", "healthy") and payload.get("initialized") is not False
-                )
-
-            self._healthy = healthy
-            self._health_checked_at = time.monotonic()
+            reply = await self._request("GET", "/api/health", attempts=2)
+            healthy = reply is not None and reply.ok
+            if reply is not None and healthy and isinstance(reply.payload, dict):
+                status = reply.payload.get("status")
+                healthy = status is None or str(status).lower() in {"ok", "healthy", "ready"}
             if not healthy:
-                self._log_once("unhealthy", "memory: worker at %s unhealthy", self._base_url)
-            else:
-                # A worker that came back may expose endpoints an older one did not.
-                self._absent.clear()
-                self._batch_write_supported = None
+                self._log_once("health", "memory worker at %s is unavailable", self._base_url)
+            self._healthy = healthy
+            self._health_checked_at = now
             return healthy
 
     async def require_available(self) -> None:
-        """Hard-fail variant for callers that genuinely cannot proceed."""
+        """Assert availability. Only for callers that cannot degrade."""
+        if not self._enabled:
+            raise MemoryUnavailable(self._base_url, "disabled by SANDMAN_MEMORY_ENABLED=false")
         if not await self.available():
-            raise MemoryUnavailable(f"claude-mem worker unavailable at {self._base_url}")
+            raise MemoryUnavailable(self._base_url)
 
     async def version(self) -> str | None:
-        payload = await self._request("GET", "/api/version")
-        if isinstance(payload, dict):
-            value = payload.get("version")
-            if isinstance(value, str):
-                return value
-        return None
+        if not await self.available():
+            return None
+        reply = await self._request("GET", "/api/version", attempts=2)
+        if reply is None or not reply.ok or not isinstance(reply.payload, dict):
+            return None
+        version = reply.payload.get("version")
+        return str(version) if version is not None else None
 
     # -- writes ------------------------------------------------------------
 
     async def record_finding(self, finding: Finding, scope: MemoryScope) -> str | None:
-        """Persist one finding as a narrative observation. Returns its id."""
+        """Persist one finding. Returns the record id when the build exposes one."""
         if not await self.available():
             return None
-        text, title = _finding_narrative(finding, scope)
-        return await self._write(text=text, title=title, scope=scope.with_probe(finding.probe_id))
+        title, narrative = _finding_narrative(finding, scope)
+        tags = _parse_tag_line(narrative)
+        _, record_id = await self._write(
+            title=title, text=narrative, project=scope.project, scope=scope, tags=tags
+        )
+        return record_id
 
     async def record_batch(self, findings: Sequence[Finding], scope: MemoryScope) -> int:
-        """Persist many findings. Returns how many were durably written."""
+        """Persist many findings. Returns how many were accepted."""
         if not findings or not await self.available():
             return 0
 
-        payloads = [_finding_narrative(f, scope) for f in findings]
-
-        if self._batch_write_supported is not False:
-            written = await self._try_batch_write(payloads, findings, scope)
+        payloads = [_finding_narrative(finding, scope) for finding in findings]
+        if self._batch_write_ok is not False:
+            written = await self._try_batch_write(payloads, scope)
             if written is not None:
                 return written
 
         semaphore = asyncio.Semaphore(_WRITE_CONCURRENCY)
 
-        async def one(index: int) -> str | None:
-            text, title = payloads[index]
+        async def one(title: str, text: str) -> bool:
             async with semaphore:
-                return await self._write(
-                    text=text, title=title, scope=scope.with_probe(findings[index].probe_id)
+                ok, _ = await self._write(
+                    title=title,
+                    text=text,
+                    project=scope.project,
+                    scope=scope,
+                    tags=_parse_tag_line(text),
                 )
+                return ok
 
-        results = await asyncio.gather(*(one(i) for i in range(len(findings))))
-        return sum(1 for result in results if result)
+        results = await asyncio.gather(*(one(title, text) for title, text in payloads))
+        return sum(1 for ok in results if ok)
 
     async def _try_batch_write(
-        self,
-        payloads: Sequence[tuple[str, str]],
-        findings: Sequence[Finding],
-        scope: MemoryScope,
+        self, payloads: Sequence[tuple[str, str]], scope: MemoryScope
     ) -> int | None:
-        """Probe the batch-write shape once.
+        """Probe the batch-write shape once. ``None`` means it is unsupported.
 
-        On the verified build ``/api/observations/batch`` is a read-by-ids
-        endpoint and rejects this body, which is indistinguishable from a build
-        that simply lacks batch writes -- both mean "fall back to single writes".
-        Returns None when the shape is unsupported.
+        On builds where ``/api/observations/batch`` is a read-by-ids endpoint
+        this returns None on the first call and is never retried.
         """
-        body: dict[str, Any] = {
+        body = {
+            "project": scope.project,
             "observations": [
                 {
-                    "text": text,
                     "title": title,
+                    "text": text,
+                    "narrative": text,
                     "project": scope.project,
-                    "metadata": _metadata(scope.with_probe(finding.probe_id)),
+                    "metadata": _metadata(scope, _parse_tag_line(text)),
                 }
-                for (text, title), finding in zip(payloads, findings, strict=True)
-            ]
+                for title, text in payloads
+            ],
         }
-        payload = await self._request("POST", "/api/observations/batch", json_body=body)
-
-        records = _structured_records(payload)
-        if records is None:
-            self._batch_write_supported = False
+        reply = await self._request("POST", "/api/observations/batch", json_body=body)
+        if reply is None or not reply.ok:
+            self._batch_write_ok = False
             self._log_once(
                 "batch-write",
-                "memory: batch write unsupported on this worker; using single writes",
+                "memory batch write unsupported (status %s); using single writes",
+                reply.status if reply else "unreachable",
             )
             return None
-
-        written = sum(1 for record in records if record.get("id") is not None)
-        if written == 0:
-            self._batch_write_supported = False
+        # A read-by-ids build answers 200 with a (here empty) array of records;
+        # that is not an acknowledgement of a write.
+        if isinstance(reply.payload, list) and len(reply.payload) != len(payloads):
+            self._batch_write_ok = False
             return None
-
-        self._batch_write_supported = True
-        return written
+        self._batch_write_ok = True
+        return len(payloads)
 
     async def record_hotfix(
         self,
@@ -631,99 +738,104 @@ class MemoryClient:
     ) -> str | None:
         """Persist how a failure was fixed.
 
-        This is the payoff for the whole module: a later run that hits an
-        equivalent failure recalls the root cause and the shape of the fix
-        instead of rediscovering both.
-
-        ``diff_digest`` is a digest, never the patch text -- a diff can carry a
-        rotated credential or customer data out of the repository and into a
-        durable store that outlives the run.
-
-        ``verified`` is recorded verbatim and prominently. An unverified fix must
-        never be recalled as a proven remedy; a later run that reapplies a patch
-        which never passed its re-probe is worse than having no memory at all.
+        This is the record a later run recalls when it hits an equivalent
+        failure. ``verified`` is written as a tag and stated in the narrative:
+        an unverified fix must never be recalled as if it had passed a lane.
         """
         if not await self.available():
             return None
 
-        hotfix_scope = scope.with_probe(probe_id)
-        status = "VERIFIED" if verified else "UNVERIFIED"
+        probe_scope = scope.with_probe(probe_id)
+        tags = [
+            *probe_scope.tags(),
+            "sandman:kind:hotfix",
+            f"sandman:verified:{'true' if verified else 'false'}",
+        ]
         lines = [
-            f"[sandman] {status} hotfix for probe {probe_id} "
-            f"(rollout {hotfix_scope.rollout_id}, project {hotfix_scope.project}).",
+            f"sandman hotfix for probe {probe_id} in rollout {scope.rollout_id}",
+            f"verified: {'yes -- reprobed and passed' if verified else 'no -- NOT confirmed'}",
             "",
-            f"Root cause: {_trim(root_cause, _MAX_REPRO_CHARS)}",
-            f"Fix: {_trim(fix_summary, _MAX_REPRO_CHARS)}",
-            f"Diff digest: {_trim(diff_digest, 200)}",
+            "root cause:",
+            _trim(redact(root_cause), 1200),
+            "",
+            "fix:",
+            _trim(redact(fix_summary), 1200),
+            "",
+            f"diff digest: {_trim(redact(diff_digest), 200)}",
         ]
         if pr_url:
-            lines.append(f"PR: {_trim(pr_url, 300)}")
-        if not verified:
-            lines.append(
-                "NOT VERIFIED: this patch did not complete a passing re-probe. "
-                "Treat as a lead, not as a proven remedy."
-            )
+            lines.append(f"pull request: {_trim(redact(pr_url), 300)}")
+        lines += ["", _tag_line(tags)]
 
-        tags = [*hotfix_scope.tags(), "sandman:kind:hotfix"]
-        tags.append("sandman:verified:true" if verified else "sandman:verified:false")
-        lines.extend(["", _tag_line(tags)])
-
-        title = f"Hotfix {probe_id} ({status.lower()}): {_trim(fix_summary, 60)}"
-        return await self._write(
-            text="\n".join(lines), title=title, scope=hotfix_scope, extra_tags=tags
+        state = "verified" if verified else "unverified"
+        title = _trim(redact(f"hotfix ({state}): {probe_id} — {fix_summary}"), _MAX_TITLE_CHARS)
+        _, record_id = await self._write(
+            title=title,
+            text=_trim("\n".join(lines), _MAX_NARRATIVE_CHARS),
+            project=scope.project,
+            scope=probe_scope,
+            tags=tags,
         )
+        return record_id
 
     async def _write(
         self,
         *,
-        text: str,
         title: str,
+        text: str,
+        project: str,
         scope: MemoryScope,
-        extra_tags: Sequence[str] | None = None,
-    ) -> str | None:
-        """Write one observation, preferring the endpoint that returns an id."""
-        tags = list(extra_tags) if extra_tags else scope.tags()
+        tags: Sequence[str],
+    ) -> tuple[bool, str | None]:
+        """Save one record. Returns (accepted, id-if-the-build-returns-one)."""
         body: dict[str, Any] = {
-            "text": _trim(redact(text), _MAX_NARRATIVE_CHARS),
-            "title": _trim(redact(title), _MAX_TITLE_CHARS),
-            "project": scope.project,
+            "text": text,
+            "title": title,
+            "project": project,
             "metadata": _metadata(scope, tags),
         }
-
-        payload = await self._request("POST", "/api/memory/save", json_body=body)
-        if isinstance(payload, dict) and payload.get("id") is not None:
-            return str(payload["id"])
-
+        reply = await self._request("POST", "/api/memory/save", json_body=body)
+        if reply is not None and reply.ok:
+            if isinstance(reply.payload, dict):
+                record_id = reply.payload.get("id")
+                if record_id is not None:
+                    return True, str(record_id)
+            return True, None
+        if reply is not None and not reply.missing_route:
+            self._log_once(
+                "save", "memory save rejected with status %s; trying session write", reply.status
+            )
         return await self._write_via_session(body, scope)
 
-    async def _write_via_session(self, body: dict[str, Any], scope: MemoryScope) -> str | None:
-        """Fallback write through the session-observation ingest.
+    async def _write_via_session(
+        self, body: dict[str, Any], scope: MemoryScope
+    ) -> tuple[bool, str | None]:
+        """Documented fallback write.
 
-        This path is asynchronous on the worker (it answers ``{"status":
-        "queued"}`` and compresses the payload with an LLM afterwards), so there
-        is no observation id to return. The session handle is returned instead so
-        a caller still has something to correlate against.
+        ``/api/sessions/observations`` ingests a tool event and answers
+        ``{"status":"queued"}``: the record is compressed asynchronously, so no
+        id exists to return.
         """
         session_id = f"sandman-{_slug(scope.project)}-{_slug(scope.rollout_id)}"
-        payload = await self._request(
-            "POST",
-            "/api/sessions/observations",
-            json_body={
-                "contentSessionId": session_id,
-                "tool_name": "SandmanObservation",
-                "tool_input": {"title": body["title"], "project": body["project"]},
-                "tool_response": {"narrative": body["text"], "metadata": body["metadata"]},
-                "project": body["project"],
-            },
-        )
-        if not isinstance(payload, dict):
-            return None
-        raw_id = payload.get("id") or payload.get("observationId")
-        if raw_id is not None:
-            return str(raw_id)
-        if payload.get("status") in ("queued", "ok", "accepted"):
-            return session_id
-        return None
+        payload: dict[str, Any] = {
+            "contentSessionId": session_id,
+            "tool_name": "sandman",
+            "project": body["project"],
+            "tool_input": {"title": body["title"], "tags": _metadata(scope, [])["tags"]},
+            "tool_response": {"text": body["text"]},
+            "text": body["text"],
+            "title": body["title"],
+            "metadata": body["metadata"],
+        }
+        reply = await self._request("POST", "/api/sessions/observations", json_body=payload)
+        if reply is None or not reply.ok:
+            self._log_once(
+                "session-write",
+                "memory write failed (status %s); finding kept in the run report only",
+                reply.status if reply else "unreachable",
+            )
+            return False, None
+        return True, None
 
     # -- recall ------------------------------------------------------------
 
@@ -735,217 +847,188 @@ class MemoryClient:
         project: str,
         limit: int = 5,
     ) -> list[Recollection]:
-        """Recall how an equivalent failure was fixed in earlier runs.
-
-        Results are ranked by the backend, then re-ranked locally so that
-        verified fixes for this exact probe outrank loose textual matches.
-        """
+        """Recall how an equivalent failure was fixed before, best first."""
         if limit <= 0 or not await self.available():
             return []
-
         terms = ["sandman", "hotfix", probe_id]
         if error_class:
             terms.append(error_class)
-        query = " ".join(dict.fromkeys(terms))
-
-        found = await self._search("/api/search", query=query, project=project, limit=limit * 3)
-        if not found:
-            found = await self._recent_for_project(project, limit=limit * 6)
-
-        probe_tag = f"sandman:probe:{_slug(probe_id)}"
-        candidates = [
-            item
-            for item in found
-            if "sandman:kind:hotfix" in item.tags or "hotfix" in item.title.lower()
-        ]
-        if not candidates:
-            candidates = found
-
-        def rank(item: Recollection) -> tuple[int, int, float, float]:
-            return (
-                0 if probe_tag in item.tags or probe_id in item.text else 1,
-                0 if "sandman:verified:true" in item.tags else 1,
-                -(item.score or 0.0),
-                -item.created_at.timestamp(),
-            )
-
-        return sorted(candidates, key=rank)[:limit]
+        found = await self._search(
+            "/api/search", query=" ".join(terms), project=project, limit=limit * 4
+        )
+        ranked = _rerank(
+            found,
+            probe_id=probe_id,
+            kind="hotfix",
+            boost_terms=[t for t in (error_class, "hotfix") if t],
+        )
+        # A fix that was never verified is still worth recalling, but it must
+        # never outrank one that passed a reprobe.
+        ranked.sort(key=lambda r: (not r.verified, -(r.score or 0.0)))
+        return ranked[:limit]
 
     async def recall_persistent_failures(
-        self, *, project: str, probe_id: str, limit: int = 10
+        self,
+        *,
+        project: str,
+        probe_id: str,
+        limit: int = 10,
     ) -> list[Recollection]:
-        """Recall earlier runs that already surfaced this failure.
+        """Earlier runs that already surfaced this probe's failure.
 
-        Feeds :attr:`Finding.previously_ignored`: a PRE_EXISTING failure that
-        several past runs also reported is a failure the team has decided to live
-        with, and presenting it as news buries the finding that is actually new.
+        A non-empty result is what lets a PRE_EXISTING finding be marked
+        ``previously_ignored`` instead of being reported as news.
         """
         if limit <= 0 or not await self.available():
             return []
-
-        query = f"sandman {probe_id} pre_existing still_broken failure"
         found = await self._search(
-            "/api/search/observations", query=query, project=project, limit=limit * 3
+            "/api/search/observations",
+            query=f"sandman finding {probe_id}",
+            project=project,
+            limit=limit * 4,
         )
         if not found:
-            found = await self._search("/api/search", query=query, project=project, limit=limit * 3)
-        if not found:
-            found = await self._recent_for_project(project, limit=limit * 6)
-
-        probe_tag = f"sandman:probe:{_slug(probe_id)}"
-        matches = [item for item in found if probe_tag in item.tags or probe_id in item.text]
-        matches.sort(key=lambda item: item.created_at, reverse=True)
-        return matches[:limit]
+            found = await self._search(
+                "/api/search", query=f"sandman {probe_id}", project=project, limit=limit * 4
+            )
+        ranked = _rerank(
+            found,
+            probe_id=probe_id,
+            kind="finding",
+            boost_terms=["pre_existing", "still_broken"],
+        )
+        ranked.sort(key=lambda r: r.created_at, reverse=True)
+        return ranked[:limit]
 
     async def semantic_context(
         self, query: str, *, project: str, limit: int = 8
     ) -> list[Recollection]:
-        """Free-text semantic recall, used to brief the hotfix agent."""
+        """Free-text semantic recall, used to brief the patch agent."""
         if not query.strip() or limit <= 0 or not await self.available():
             return []
-
-        capped = min(limit, _SEMANTIC_LIMIT_MAX)
-        payload = await self._request(
-            "POST",
-            "/api/context/semantic",
-            # The worker reads `q`; `query` is sent alongside for builds that
-            # renamed it. Sending both is cheaper than version-sniffing.
-            json_body={"q": query, "query": query, "project": project, "limit": capped},
-        )
-        if payload is None:
+        # This build reads the query from `q`; older ones read `query`. Sending
+        # both is accepted by each.
+        body: dict[str, Any] = {
+            "q": query,
+            "query": query,
+            "project": project,
+            "limit": limit,
+        }
+        reply = await self._request("POST", "/api/context/semantic", json_body=body)
+        if reply is None or not reply.ok:
+            self._log_once(
+                "semantic",
+                "memory semantic context unavailable (status %s)",
+                reply.status if reply else "unreachable",
+            )
             return []
 
-        records = _structured_records(payload)
+        records = _structured_records(reply.payload)
         if records:
-            return _to_recollections(records)[:capped]
+            return [
+                rec
+                for rec in (
+                    _record_to_recollection(record, _rank_score(index, len(records)))
+                    for index, record in enumerate(records)
+                )
+                if rec is not None
+            ][:limit]
 
-        if isinstance(payload, dict):
-            context = payload.get("context")
+        if isinstance(reply.payload, dict):
+            context = reply.payload.get("context")
             if isinstance(context, str) and context.strip():
-                return _parse_semantic_context(context)[:capped]
-
+                return _parse_semantic_context(context)[:limit]
         return []
-
-    # -- recall plumbing ---------------------------------------------------
 
     async def _search(
-        self, path: str, *, query: str, project: str | None, limit: int
+        self, path: str, *, query: str, project: str, limit: int
     ) -> list[Recollection]:
-        """POST-first search with a GET fallback, normalized to records.
+        """Run one search and return hydrated records.
 
-        A query is always sent: the worker rejects a filterless, queryless search
-        with ``INVALID_SEARCH_REQUEST``.
+        The worker rejects an empty search, so a query is always sent. MCP
+        envelope responses carry ids but not bodies, hence the hydration step.
         """
-        body: dict[str, Any] = {"query": query, "q": query, "limit": limit}
-        if project:
-            body["project"] = project
-
-        payload = await self._request("POST", path, json_body=body)
-        if payload is None:
-            params: dict[str, str | int] = {"query": query, "q": query, "limit": limit}
-            if project:
-                params["project"] = project
-            payload = await self._request("GET", path, params=params)
-        if payload is None:
+        body: dict[str, Any] = {"query": query, "project": project, "limit": limit}
+        params: dict[str, str | int] = {"query": query, "project": project, "limit": limit}
+        reply = await self._post_or_get(path, body=body, params=params)
+        if reply is None or not reply.ok:
+            self._log_once(
+                f"search:{path}",
+                "memory search %s unavailable (status %s)",
+                path,
+                reply.status if reply else "unreachable",
+            )
             return []
 
-        records = _structured_records(payload)
+        records = _structured_records(reply.payload)
         if records:
-            return _to_recollections(records)
+            hydrated = [
+                rec
+                for rec in (
+                    _record_to_recollection(record, _rank_score(index, len(records)))
+                    for index, record in enumerate(records)
+                )
+                if rec is not None
+            ]
+            return _only_project(hydrated, records, project)
 
-        text = _mcp_text(payload)
-        if text:
-            ids = _ids_from_mcp_text(text, limit)
-            if ids:
-                return await self._hydrate(ids)
-        return []
-
-    async def _hydrate(self, ids: Sequence[int]) -> list[Recollection]:
-        """Turn ranked ids into full records.
-
-        Search answers with a markdown table carrying ids and titles but no
-        bodies; the batch read is what makes those hits usable.
-        """
-        payload = await self._request(
-            "POST", "/api/observations/batch", json_body={"ids": list(ids)}
-        )
-        records = _structured_records(payload)
-        if not records:
+        text = _mcp_text(reply.payload)
+        if not text:
             return []
+        ids = _ids_from_text(text, limit)
+        return await self._hydrate(ids, project=project) if ids else []
 
+    async def _hydrate(self, ids: Sequence[int], *, project: str) -> list[Recollection]:
+        """Fetch full records for search hits, preserving search rank order."""
+        reply = await self._request("POST", "/api/observations/batch", json_body={"ids": list(ids)})
+        records = _structured_records(reply.payload) if reply is not None and reply.ok else None
+        if not records:
+            records = await self._hydrate_one_by_one(ids)
         by_id = {str(record.get("id")): record for record in records}
-        ordered = [by_id[str(i)] for i in ids if str(i) in by_id]
-        return _to_recollections(ordered)
 
-    async def _recent_for_project(self, project: str, *, limit: int) -> list[Recollection]:
-        """Last-resort recall for builds whose search endpoints are absent.
+        out: list[Recollection] = []
+        for index, raw_id in enumerate(ids):
+            record = by_id.get(str(raw_id))
+            if record is None:
+                continue
+            record_project = record.get("project")
+            if isinstance(record_project, str) and record_project != project:
+                continue
+            recollection = _record_to_recollection(record, _rank_score(index, len(ids)))
+            if recollection is not None:
+                out.append(recollection)
+        return out
 
-        The listing endpoint is plain SQL paging, so it always works when the
-        worker is up at all; relevance is then decided by the caller's filters.
-        """
-        params: dict[str, str | int] = {"limit": max(1, min(limit, 200))}
-        if project:
-            params["project"] = project
-        payload = await self._request("GET", "/api/observations", params=params)
-        records = _structured_records(payload)
-        return _to_recollections(records) if records else []
+    async def _hydrate_one_by_one(self, ids: Sequence[int]) -> list[dict[str, Any]]:
+        semaphore = asyncio.Semaphore(_WRITE_CONCURRENCY)
+
+        async def fetch(raw_id: int) -> dict[str, Any] | None:
+            async with semaphore:
+                reply = await self._request("GET", f"/api/observation/{raw_id}", attempts=2)
+            if reply is None or not reply.ok:
+                return None
+            if isinstance(reply.payload, dict):
+                inner = reply.payload.get("observation")
+                return inner if isinstance(inner, dict) else reply.payload
+            return None
+
+        fetched = await asyncio.gather(*(fetch(raw_id) for raw_id in ids))
+        return [record for record in fetched if record is not None]
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Ranking helpers
 # ---------------------------------------------------------------------------
 
 
-def _decode(response: httpx.Response) -> Any | None:
-    """Decode a body, tolerating the empty and HTML replies this worker emits."""
-    if not response.content or not response.content.strip():
-        return None
-    content_type = response.headers.get("content-type", "")
-    if "json" not in content_type.lower() and response.text.lstrip().startswith("<"):
-        return None
-    try:
-        return response.json()
-    except ValueError:
-        return None
-
-
-def _backoff(attempt: int) -> float:
-    """Exponential backoff with full jitter, capped."""
-    ceiling = min(_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), _BACKOFF_CAP_SECONDS)
-    return random.uniform(0.0, ceiling)
-
-
-def _retry_delay(response: httpx.Response, attempt: int) -> float:
-    """Honour ``Retry-After`` (seconds or HTTP-date), else jittered backoff."""
-    header = response.headers.get("retry-after")
-    if header:
-        raw = header.strip()
-        with contextlib.suppress(ValueError):
-            return max(0.0, min(float(raw), _RETRY_AFTER_CAP_SECONDS))
-        with contextlib.suppress(TypeError, ValueError):
-            when = parsedate_to_datetime(raw)
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=UTC)
-            delta = (when - datetime.now(UTC)).total_seconds()
-            return max(0.0, min(delta, _RETRY_AFTER_CAP_SECONDS))
-    return _backoff(attempt)
-
-
-def _trim(value: str, limit: int) -> str:
-    text = value.strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
-
-
-def _metadata(scope: MemoryScope, tags: Sequence[str] | None = None) -> dict[str, Any]:
-    """Structured sidecar. Duplicated into the narrative tag line, which is the
-    only copy guaranteed to survive a read on every worker build."""
+def _metadata(scope: MemoryScope, tags: Sequence[str]) -> dict[str, Any]:
+    """Structured metadata mirroring the tag line embedded in the narrative."""
+    merged = list(tags) or scope.tags()
     payload: dict[str, Any] = {
         "source": "sandman",
+        "tags": merged,
         "project": scope.project,
         "rollout_id": scope.rollout_id,
-        "tags": list(tags) if tags is not None else scope.tags(),
     }
     if scope.variant is not None:
         payload["variant"] = scope.variant.value
@@ -956,107 +1039,52 @@ def _metadata(scope: MemoryScope, tags: Sequence[str] | None = None) -> dict[str
     return payload
 
 
-def _finding_narrative(finding: Finding, scope: MemoryScope) -> tuple[str, str]:
-    """Render a finding as (narrative, title).
-
-    The narrative leads with classification and probe id because those are what a
-    later run matches on, and carries a short reproduction so a recollection is
-    actionable without re-reading the original run.
-    """
-    probe_scope = scope.with_probe(finding.probe_id)
-    tags = [
-        *probe_scope.tags(),
-        "sandman:kind:finding",
-        f"sandman:classification:{finding.classification.value}",
-        f"sandman:severity:{finding.severity.value}",
-    ]
-    if finding.previously_ignored:
-        tags.append("sandman:previously-ignored:true")
-
-    lines = [
-        f"[sandman] {finding.classification.value} on probe {finding.probe_id} "
-        f"(severity {finding.severity.value}, run {finding.run_id}).",
-        "",
-        _trim(finding.title, _MAX_TITLE_CHARS),
-        "",
-        _trim(finding.description, 2_000),
-    ]
-
-    if finding.reproduction:
-        lines += ["", f"Reproduction: {_trim(finding.reproduction, _MAX_REPRO_CHARS)}"]
-
-    evidence = _render_evidence(finding.variant_evidence)
-    if evidence:
-        lines += ["", "Evidence:", *evidence]
-
-    if finding.first_seen_run_id:
-        lines += ["", f"First seen in run {finding.first_seen_run_id}."]
-
-    lines += ["", _tag_line(tags)]
-
-    title = f"{finding.classification.value}/{finding.probe_id}: {_trim(finding.title, 60)}"
-    return "\n".join(lines), title
-
-
-def _render_evidence(evidence: dict[Variant, str]) -> list[str]:
-    from .models import VARIANT_ORDER
-
-    return [
-        f"  {variant.glyph} {variant.value}: {_trim(evidence[variant], _MAX_EVIDENCE_CHARS)}"
-        for variant in VARIANT_ORDER
-        if evidence.get(variant)
-    ]
-
-
-def _to_recollections(records: Iterable[dict[str, Any]]) -> list[Recollection]:
-    rows = list(records)
-    out: list[Recollection] = []
-    for index, record in enumerate(rows):
-        item = _record_to_recollection(record, fallback_score=_rank_score(index, len(rows)))
-        if item is not None:
-            out.append(item)
-    return out
-
-
-def _parse_semantic_context(context: str) -> list[Recollection]:
-    """Split the semantic endpoint's prose blob into per-observation sections.
-
-    The endpoint returns rendered markdown (``### <title> (<date>)`` followed by
-    the narrative) rather than records, so the sections are recovered by header.
-    Ids are not present in this format; a stable synthetic id keyed to the header
-    position is used so callers can de-duplicate within one response.
-    """
-    matches = list(_SEMANTIC_SECTION_RE.finditer(context))
-    if not matches:
-        body = context.strip()
-        if not body:
-            return []
-        return [
-            Recollection(
-                id="semantic:0",
-                title=_trim(body.splitlines()[0], _MAX_TITLE_CHARS),
-                text=redact(body),
-                created_at=datetime.now(UTC),
-                score=1.0,
-                tags=_parse_tag_line(body),
-            )
-        ]
-
-    out: list[Recollection] = []
-    for index, match in enumerate(matches):
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(context)
-        body = context[start:end].strip()
-        if not body:
+def _only_project(
+    recollections: Sequence[Recollection], records: Sequence[dict[str, Any]], project: str
+) -> list[Recollection]:
+    keep: list[Recollection] = []
+    for recollection, record in zip(recollections, records, strict=False):
+        record_project = record.get("project")
+        if isinstance(record_project, str) and record_project != project:
             continue
-        out.append(
-            Recollection(
-                id=f"semantic:{index}",
-                title=_trim(match.group("title"), _MAX_TITLE_CHARS),
-                text=redact(body),
-                created_at=_coerce_datetime(match.group("date")),
-                score=_rank_score(index, len(matches)),
-                tags=_parse_tag_line(body),
-            )
-        )
-    return out
+        keep.append(recollection)
+    return keep
+
+
+def _rerank(
+    recollections: Sequence[Recollection],
+    *,
+    probe_id: str,
+    kind: str,
+    boost_terms: Sequence[str],
+) -> list[Recollection]:
+    """Re-score search hits against the scope we actually asked about.
+
+    The worker ranks on lexical match alone, which happily returns another
+    probe's record when the two share vocabulary. A record whose own tags say it
+    belongs to a different probe, or is a different kind of record, is dropped
+    rather than down-weighted: recalling a *finding* as though it were a fix
+    would tell the patch agent a bug was already solved when it was not.
+    """
+    probe_slug = _slug(probe_id)
+    probe_tag = f"sandman:probe:{probe_slug}"
+    kind_tag = f"sandman:kind:{kind}"
+    scored: list[Recollection] = []
+    for recollection in recollections:
+        tagged_probe = recollection.probe_id
+        if tagged_probe is not None and tagged_probe != probe_slug:
+            continue
+        if recollection.kind is not None and recollection.kind != kind:
+            continue
+        score = recollection.score or 0.5
+        if probe_tag in recollection.tags:
+            score += 0.35
+        if kind_tag in recollection.tags:
+            score += 0.25
+        haystack = f"{recollection.title}\n{recollection.text}".lower()
+        for term in boost_terms:
+            if term.lower() in haystack:
+                score += 0.1
+        scored.append(recollection.model_copy(update={"score": round(min(score, 2.0), 4)}))
+    scored.sort(key=lambda r: r.score or 0.0, reverse=True)
+    return scored
