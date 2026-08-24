@@ -323,14 +323,14 @@ interface RequestOptions {
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, timeoutMs = TIMEOUT_NORMAL } = options
 
+  const headers: Record<string, string> = { accept: "application/json" }
+  if (body !== undefined) headers["content-type"] = "application/json"
+
   let response: Response
   try {
     response = await fetch(`${baseUrl()}${path}`, {
       method,
-      headers: body === undefined ? { accept: "application/json" } : {
-        accept: "application/json",
-        "content-type": "application/json",
-      },
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
       // Run state changes second to second; a cached read would render a stale
