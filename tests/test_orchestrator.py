@@ -409,3 +409,27 @@ class TestHotfixNeverTargetsLkg:
         from sandman.config import PromotionPolicy
 
         assert PromotionPolicy().review_timeout_seconds <= 600
+
+
+class TestHotfixAttemptCap:
+    def test_default_cap_is_small(self) -> None:
+        from sandman.config import PromotionPolicy
+
+        assert PromotionPolicy().max_hotfix_attempts <= 5
+
+    def test_capped_and_worst_first(self) -> None:
+        """One bug seen by five probes is five findings, not five bugs."""
+        from sandman.config import PromotionPolicy
+
+        policy = PromotionPolicy(max_hotfix_attempts=2)
+        findings = [
+            _fake_finding(Classification.STILL_BROKEN),
+            _fake_finding(Classification.REGRESSION),
+            _fake_finding(Classification.HOTFIX_INDUCED),
+        ]
+        ordered = sorted(findings, key=lambda f: f.classification.severity)
+        chosen = ordered[: policy.max_hotfix_attempts]
+
+        assert len(chosen) == 2
+        assert chosen[0].classification is Classification.REGRESSION
+        assert Classification.STILL_BROKEN not in {f.classification for f in chosen}

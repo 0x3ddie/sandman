@@ -123,7 +123,16 @@ on_exceed = "hard_stop"
 # ---------------------------------------------------------------------------
 
 [promotion]
+# One bug can surface through several probes, so cap how many patches a single
+# run authors rather than re-fixing the same line five times.
+max_hotfix_attempts = 2
+
+# Greptile is the merge gate. Install its GitHub App on the repository, or set
+# this to false to let a run merge into the standalone verification branch
+# without a review. LKG is still protected either way: promotion requires a
+# clean three-way re-probe.
 require_greptile_approval = true
+review_timeout_seconds = 300
 require_reprobe = true
 block_on_regression = true
 block_on_new_findings = true

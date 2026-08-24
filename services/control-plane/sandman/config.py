@@ -257,6 +257,14 @@ class PromotionPolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    max_hotfix_attempts: int = Field(default=3, ge=1, le=50)
+    """How many patches one run may author.
+
+    Findings are not independent bugs. A single off-by-one surfaced through five
+    probes produces five findings, and authoring a separate patch for each one
+    burns model budget re-fixing the same line and opens five near-identical
+    pull requests. Highest severity first, then stop."""
+
     require_greptile_approval: bool = True
     review_timeout_seconds: int = Field(default=300, ge=30, le=3600)
     """How long to wait for a Greptile review before failing closed.

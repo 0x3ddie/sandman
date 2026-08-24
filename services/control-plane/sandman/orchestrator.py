@@ -327,6 +327,25 @@ class Orchestrator:
         if not candidates:
             return []
 
+        # Worst first, then stop at the cap. Five probes catching one off-by-one
+        # are five findings and one bug; patching each separately would re-fix
+        # the same line and open near-identical pull requests.
+        candidates = sorted(candidates, key=lambda f: f.classification.severity)
+        limit = self.config.promotion.max_hotfix_attempts
+        deferred = len(candidates) - limit
+        candidates = candidates[:limit]
+        if deferred > 0:
+            self.bus.emit(
+                EventType.RUN_PROGRESS,
+                phase="remediation-capped",
+                attempted=len(candidates),
+                deferred=deferred,
+                detail=(
+                    f"{deferred} further finding(s) deferred: max_hotfix_attempts is {limit}. "
+                    "Re-run after these merge, or raise the cap."
+                ),
+            )
+
         self._advance(RunState.REMEDIATING)
         owner, repo = _split_repo(self.config.repository_url)
         attempts: list[HotfixAttempt] = []
