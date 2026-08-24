@@ -59,8 +59,8 @@ def search(
 ) -> dict[str, Any]:
     """Paginated catalog search.
 
-    Over-fetches by one element to decide whether further results exist,
-    then trims the window down to limit.
+    Fetches one element beyond the requested window so the response can tell
+    the caller whether further results exist without a second count query.
     """
     results = ITEMS
     if category:
@@ -74,9 +74,9 @@ def search(
     elif sort == "rating":
         results = sorted(results, key=lambda i: -i["rating"])
 
-    window = results[offset : offset + limit + 1]
-    has_more = len(window) > limit
-    page = window[:limit]
+    page = results[offset : offset + limit + 1]
+    has_more = page[limit] is not None
+    page = page[:limit]
 
     return {
         "query": q,
