@@ -1,54 +1,12 @@
 import * as React from "react"
 
 import { cn } from "@/lib/utils"
+import { STATUS_META, VARIANT_META, VARIANT_ORDER, type Variant } from "@/lib/variants"
 
-/** Mirrors Variant in services/control-plane/sandman/models.py. */
-export type VariantKey = "baseline" | "initial" | "hotfix"
-
-/**
- * The order is part of the encoding, not a default. Every surface that shows
- * more than one variant iterates this constant so B → I → H never varies.
- */
-export const VARIANT_ORDER = ["baseline", "initial", "hotfix"] as const satisfies readonly VariantKey[]
-
-export interface VariantMeta {
-  glyph: string
-  label: string
-  description: string
-  color: string
-  wash: string
-  border: string
-}
-
-export const VARIANT_META: Record<VariantKey, VariantMeta> = {
-  baseline: {
-    glyph: "B",
-    label: "Baseline",
-    description: "Previous LKG",
-    color: "var(--variant-baseline)",
-    wash: "var(--variant-baseline-wash)",
-    border: "var(--variant-baseline-border)",
-  },
-  initial: {
-    glyph: "I",
-    label: "Initial",
-    description: "Current LKG",
-    color: "var(--variant-initial)",
-    wash: "var(--variant-initial-wash)",
-    border: "var(--variant-initial-border)",
-  },
-  hotfix: {
-    glyph: "H",
-    label: "Hotfix",
-    description: "Current LKG + patch",
-    color: "var(--variant-hotfix)",
-    wash: "var(--variant-hotfix-wash)",
-    border: "var(--variant-hotfix-border)",
-  },
-}
+export type { Variant }
 
 export interface VariantBadgeProps extends Omit<React.ComponentProps<"span">, "children"> {
-  variant: VariantKey
+  variant: Variant
   showLabel?: boolean
 }
 
@@ -92,31 +50,30 @@ export function VariantBadge({
 /** `null` means the lane did not run — a hotfix that was never authored. */
 export type VariantOutcome = boolean | null
 
-const OUTCOME_TOKENS: Record<"pass" | "fail" | "absent", { mark: string; fg: string; bg: string; border: string; word: string }> = {
+type OutcomeKey = "pass" | "fail" | "absent"
+
+const OUTCOME_TOKENS: Record<OutcomeKey, { mark: string; color: string; wash: string; word: string }> = {
   pass: {
     mark: "✓",
-    fg: "var(--status-pass)",
-    bg: "var(--status-pass-wash)",
-    border: "rgb(63 214 140 / 0.28)",
+    color: STATUS_META.passed.color,
+    wash: STATUS_META.passed.wash,
     word: "pass",
   },
   fail: {
     mark: "✕",
-    fg: "var(--status-fail)",
-    bg: "var(--status-fail-wash)",
-    border: "rgb(255 95 109 / 0.28)",
+    color: STATUS_META.failed.color,
+    wash: STATUS_META.failed.wash,
     word: "fail",
   },
   absent: {
     mark: "–",
-    fg: "var(--fg-quaternary)",
-    bg: "transparent",
-    border: "var(--border-hairline)",
+    color: "var(--fg-quaternary)",
+    wash: "transparent",
     word: "not run",
   },
 }
 
-function outcomeKey(outcome: VariantOutcome): "pass" | "fail" | "absent" {
+function outcomeKey(outcome: VariantOutcome): OutcomeKey {
   if (outcome === null) return "absent"
   return outcome ? "pass" : "fail"
 }
@@ -129,9 +86,9 @@ export interface VariantTripleProps extends Omit<React.ComponentProps<"span">, "
 
 /**
  * The mini-matrix behind every classification. Each cell pairs the variant glyph
- * (in the triad colour) with the outcome mark (in the status colour), so both
- * axes survive without colour: glyph identifies the lane, mark shape identifies
- * the result, and position is always B → I → H.
+ * (in the triad colour) with the outcome mark (in the status colour), so neither
+ * axis depends on colour: the glyph names the lane, the mark's shape names the
+ * result, and the position is always B → I → H.
  */
 export function VariantTriple({
   baseline,
@@ -140,7 +97,7 @@ export function VariantTriple({
   className,
   ...props
 }: VariantTripleProps) {
-  const outcomes: Record<VariantKey, VariantOutcome> = { baseline, initial, hotfix }
+  const outcomes: Record<Variant, VariantOutcome> = { baseline, initial, hotfix }
   const description = VARIANT_ORDER.map(
     (key) => `${VARIANT_META[key].label} ${OUTCOME_TOKENS[outcomeKey(outcomes[key])].word}`,
   ).join(", ")
@@ -162,12 +119,18 @@ export function VariantTriple({
             aria-hidden
             data-variant={key}
             className="flex h-5 w-[26px] items-center justify-center gap-[3px] rounded-[4px] border"
-            style={{ backgroundColor: token.bg, borderColor: token.border }}
+            style={{
+              backgroundColor: token.wash,
+              borderColor: `color-mix(in srgb, ${token.color} 28%, transparent)`,
+            }}
           >
-            <span className="mono text-[9.5px] font-medium leading-none" style={{ color: meta.color }}>
+            <span
+              className="mono text-[9.5px] font-medium leading-none"
+              style={{ color: meta.color }}
+            >
               {meta.glyph}
             </span>
-            <span className="mono text-[10px] font-medium leading-none" style={{ color: token.fg }}>
+            <span className="mono text-[10px] font-medium leading-none" style={{ color: token.color }}>
               {token.mark}
             </span>
           </span>

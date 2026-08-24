@@ -19,7 +19,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -36,10 +37,24 @@ from .orchestrator import Orchestrator, RunOutcome
 
 log = logging.getLogger("sandman.api")
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Cancel in-flight runs and close every event bus on shutdown.
+
+    Sandboxes bill for wall-clock time, so a run must not survive the process
+    that was supposed to be tearing it down.
+    """
+    yield
+    for task in _TASKS.values():
+        task.cancel()
+    await bus_registry.close_all()
+
+
 app = FastAPI(
     title="sandman control plane",
     version="0.1.0",
     description="Pen-tests a rollout before it ships.",
+    lifespan=lifespan,
 )
 
 # The dashboard runs on a different port in development.
@@ -343,10 +358,3 @@ def _new_run_id() -> str:
     import uuid
 
     return f"run_{uuid.uuid4().hex[:12]}"
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    for task in _TASKS.values():
-        task.cancel()
-    await bus_registry.close_all()
