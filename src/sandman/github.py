@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from sandman.models import InvestigationReport, Lane
+from sandman.models import InvestigationReport, Lane, RuntimeName
 
 
 class PullRequestRequest(BaseModel):
@@ -193,6 +193,11 @@ def _evidence_lines(report: InvestigationReport) -> list[str]:
         )
     probe = report.request.probe
     candidate = next(result for result in report.results if result.lane is Lane.CANDIDATE)
+    runtime_label = (
+        "Deterministic demo (simulated)"
+        if report.request.runtime is RuntimeName.DEMO
+        else "Modal Sandboxes"
+    )
     return [
         "## Sandman verification",
         "",
@@ -200,6 +205,7 @@ def _evidence_lines(report: InvestigationReport) -> list[str]:
         "",
         f"**Probe:** `{probe.method} {probe.path}`  ",
         f"**Expected status:** `{probe.expected_status}`  ",
+        f"**Runtime:** {runtime_label}  ",
         f"**Candidate sandbox:** `{candidate.sandbox_id}`",
         "",
         "| Lane | Revision | Result | HTTP | Latency |",
@@ -226,7 +232,11 @@ class GitHubCheckPublisher:
         )
         url = f"https://api.github.com/repos/{repository.owner}/{repository.repository}/check-runs"
         payload = {
-            "name": "Sandman production verification",
+            "name": (
+                "Sandman demo verification"
+                if report.request.runtime is RuntimeName.DEMO
+                else "Sandman production verification"
+            ),
             "head_sha": head_sha,
             "status": "completed",
             "conclusion": conclusion,

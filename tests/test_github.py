@@ -31,6 +31,7 @@ def test_pull_request_body_contains_evidence_and_greptile_handoff() -> None:
     body = build_pull_request_body(report)
 
     assert "Candidate fixes the reproduced regression" in body
+    assert "**Runtime:** Deterministic demo (simulated)" in body
     assert "@greptileai" in body
     assert "sandman-investigation:abc123" in body
 
@@ -41,6 +42,7 @@ def test_check_run_contains_candidate_evidence() -> None:
         assert request.headers["Authorization"] == "Bearer test-token"
         payload = json.loads(request.content)
         assert payload["head_sha"] == "d" * 40
+        assert payload["name"] == "Sandman demo verification"
         assert payload["conclusion"] == "success"
         assert "Known Good" in payload["output"]["summary"]
         assert "@greptileai" not in payload["output"]["summary"]
