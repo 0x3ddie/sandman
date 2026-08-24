@@ -69,6 +69,7 @@ class HotfixAttempt:
     finding: Finding
     state: str = "authoring"
     branch: str | None = None
+    verify_branch: str | None = None
     base_sha: str | None = None
     commit_sha: str | None = None
     root_cause: str | None = None
@@ -96,6 +97,7 @@ class HotfixAttempt:
             "probeId": self.finding.probe_id,
             "classification": self.finding.classification.value,
             "branch": self.branch,
+            "verifyBranch": self.verify_branch,
             "commitSha": self.commit_sha,
             "rootCause": self.root_cause,
             "fixSummary": self.fix_summary,
@@ -177,6 +179,17 @@ class Orchestrator:
         self.memory = memory or MemoryClient(self.settings)
         self.outcome = RunOutcome(run_id=self.run_id, state=RunState.QUEUED)
 
+    def _advance(self, state: RunState, **data: Any) -> None:
+        """Move the run to a new phase.
+
+        Both the outcome and the event bus are updated together. Setting only
+        the bus left ``GET /api/runs/{id}`` reporting "queued" for the whole
+        run, because the outcome's state was not assigned until run() returned
+        -- so a working investigation looked frozen in the dashboard.
+        """
+        self.outcome.state = state
+        self.bus.set_run_state(state, **data)
+
     # -- probes -----------------------------------------------------------
 
     def build_probes(self) -> list[ProbeDefinition]:
@@ -238,7 +251,7 @@ class Orchestrator:
         self, revisions: dict[Variant, Revision], probes: Sequence[ProbeDefinition]
     ) -> list[ProbeResult]:
         """Fan out BASELINE and INITIAL and collect every result."""
-        self.bus.set_run_state(RunState.PROVISIONING)
+        self._advance(RunState.PROVISIONING)
         plans = plan_variants(self.config, revisions)
         if not plans:
             raise OrchestratorError("no variants enabled")
@@ -249,7 +262,7 @@ class Orchestrator:
             bus=self.bus,
             repo_url=self.config.repository_url,
         )
-        self.bus.set_run_state(RunState.PROBING)
+        self._advance(RunState.PROBING)
         results: list[ProbeResult] = await engine.run_all(plans, probes)
         self.bus.emit(EventType.BUDGET, **self.budget.snapshot())
         return results
@@ -257,7 +270,7 @@ class Orchestrator:
     def compare_phase(
         self, results: Sequence[ProbeResult], *, require_hotfix: bool
     ) -> RunVerdict:
-        self.bus.set_run_state(RunState.COMPARING)
+        self._advance(RunState.COMPARING)
         try:
             verdict = evaluate(
                 self.run_id, results, require_hotfix=require_hotfix, include_stable=False
@@ -314,7 +327,7 @@ class Orchestrator:
         if not candidates:
             return []
 
-        self.bus.set_run_state(RunState.REMEDIATING)
+        self._advance(RunState.REMEDIATING)
         owner, repo = _split_repo(self.config.repository_url)
         attempts: list[HotfixAttempt] = []
 
@@ -428,15 +441,27 @@ class Orchestrator:
         self, attempt: HotfixAttempt, owner: str, repo: str, token: str
     ) -> None:
         assert attempt.branch is not None
-        self.bus.set_run_state(RunState.REVIEWING)
+        self._advance(RunState.REVIEWING)
 
         client = GitHubClient(token)
         try:
+            # The pull request targets a standalone branch cut from the LKG
+            # commit, never the LKG branch itself. A hotfix reaches LKG only
+            # after this branch has been re-probed three-way and the promotion
+            # gate has opened -- merging straight into LKG here would ship an
+            # unverified patch to the very branch the product exists to protect.
+            verify_branch = f"{self.config.hotfix_branch_prefix}-verify-{attempt.id}"
+            base_sha = attempt.base_sha
+            if base_sha is None:
+                raise OrchestratorError(f"hotfix {attempt.id} has no base commit")
+            await client.create_branch(owner, repo, verify_branch, base_sha)
+            attempt.verify_branch = verify_branch
+
             pr = await client.create_pull_request(
                 owner,
                 repo,
                 head=attempt.branch,
-                base=self.config.lkg_branch,
+                base=verify_branch,
                 title=f"sandman: fix {attempt.finding.probe_id}",
                 body=_pr_body(attempt),
                 draft=False,
@@ -446,21 +471,43 @@ class Orchestrator:
             attempt.state = "in_review"
             self.bus.emit(EventType.HOTFIX, **attempt.as_dict())
 
-            reviewer = GreptileReviewer(self.settings)
-            review = await reviewer.poll_pr_review(
-                owner, repo, pr.number, github_token=token
-            )
+            review: ReviewResult | None = None
+            if self.config.promotion.require_greptile_approval:
+                reviewer = GreptileReviewer(self.settings)
+                try:
+                    review = await reviewer.poll_pr_review(
+                        owner,
+                        repo,
+                        pr.number,
+                        github_token=token,
+                        timeout_s=self.config.promotion.review_timeout_seconds,
+                    )
+                except GreptileUnavailable as exc:
+                    # Fail closed, but say why: the overwhelmingly common cause
+                    # is the Greptile App simply not being installed on the repo,
+                    # and a bare timeout gives no hint of that.
+                    attempt.state = "blocked"
+                    attempt.rejection_reason = (
+                        f"no Greptile review arrived within "
+                        f"{self.config.promotion.review_timeout_seconds}s ({exc}). "
+                        f"Install the Greptile GitHub App on {owner}/{repo}, or set "
+                        "promotion.require_greptile_approval = false to merge without it."
+                    )
+                    self.bus.emit(EventType.HOTFIX, **attempt.as_dict())
+                    return
             attempt.review = review
             self.bus.emit(
                 EventType.REVIEW,
                 hotfixId=attempt.id,
-                approved=review.approved,
-                score=review.score,
-                summary=review.summary,
-                blocking=len(review.blocking_comments),
+                approved=review.approved if review else None,
+                score=review.score if review else None,
+                summary=review.summary if review else "review not required",
+                blocking=len(review.blocking_comments) if review else 0,
             )
 
-            if review.gates_merge(self.config.promotion.require_greptile_approval):
+            if review is not None and review.gates_merge(
+                self.config.promotion.require_greptile_approval
+            ):
                 attempt.state = "blocked"
                 attempt.rejection_reason = review.gate_reason or "review did not approve"
                 self.bus.emit(EventType.HOTFIX, **attempt.as_dict())
@@ -492,7 +539,7 @@ class Orchestrator:
         if not merged or not self.config.promotion.require_reprobe:
             return [], None
 
-        self.bus.set_run_state(RunState.VERIFYING)
+        self._advance(RunState.VERIFYING)
         winner = merged[-1]
         assert winner.merged_sha is not None and winner.branch is not None
 

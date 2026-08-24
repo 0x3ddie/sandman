@@ -258,6 +258,12 @@ class PromotionPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     require_greptile_approval: bool = True
+    review_timeout_seconds: int = Field(default=300, ge=30, le=3600)
+    """How long to wait for a Greptile review before failing closed.
+
+    Reviews normally land in about three minutes. The old 15-minute default
+    meant a repository without the Greptile App installed stalled every hotfix
+    for a quarter of an hour before reporting anything."""
     require_reprobe: bool = True
     """Re-run the full fan-out against the merged standalone branch before LKG."""
 

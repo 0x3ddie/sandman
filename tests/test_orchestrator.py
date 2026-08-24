@@ -363,3 +363,49 @@ def _staged_results(*, baseline: bool, initial: bool, hotfix: bool) -> list[Prob
                 )
             )
     return out
+
+
+class TestHotfixNeverTargetsLkg:
+    """A hotfix pull request must never be opened against the LKG branch.
+
+    LKG is the branch this product exists to protect. A patch reaches it only
+    after being merged to a standalone branch and re-probed three-way, so
+    opening the PR against LKG directly would put an unverified change one
+    click from production. This was a real defect: the code targeted
+    `config.lkg_branch` while the comment beside it claimed otherwise, and a
+    live run opened exactly such a pull request.
+    """
+
+    def test_pr_base_is_a_standalone_branch(self) -> None:
+        import inspect
+
+        from sandman import orchestrator
+
+        source = inspect.getsource(orchestrator.Orchestrator._review_and_merge)
+        assert "base=verify_branch" in source, "the PR must target the standalone branch"
+        assert "base=self.config.lkg_branch" not in source, (
+            "a hotfix PR must never be opened against the LKG branch"
+        )
+
+    def test_verify_branch_is_namespaced_and_distinct(self) -> None:
+        from sandman.config import ProjectConfig
+
+        cfg = ProjectConfig(
+            repository_url="https://github.com/acme/widgets",
+            lkg_branch="main",
+            probes=[{"id": "p", "preset": "api-fuzz-differential"}],
+        )
+        finding = _fake_finding(Classification.STILL_BROKEN)
+        attempt = HotfixAttempt(id="hfx_abc", finding=finding)
+        verify = f"{cfg.hotfix_branch_prefix}-verify-{attempt.id}"
+        hotfix = f"{cfg.hotfix_branch_prefix}-{attempt.id}"
+
+        assert verify != hotfix, "head and base must differ or the PR is empty"
+        assert verify.startswith("sandman/"), "cleanup only deletes sandman/* branches"
+        assert verify != cfg.lkg_branch
+
+    def test_review_timeout_is_bounded(self) -> None:
+        """A missing Greptile App must not stall a hotfix for a quarter hour."""
+        from sandman.config import PromotionPolicy
+
+        assert PromotionPolicy().review_timeout_seconds <= 600
