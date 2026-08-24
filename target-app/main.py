@@ -75,7 +75,7 @@ def search(
         results = sorted(results, key=lambda i: -i["rating"])
 
     page = results[offset : offset + limit + 1]
-    has_more = page[limit] is not None
+    has_more = len(page) > limit
     page = page[:limit]
 
     return {
