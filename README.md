@@ -7,6 +7,31 @@ the candidate actually fixes the reproduced failure.
 It is deliberately not a canary deployment. A canary exposes some live traffic to a new
 release; Sandman produces pre-rollout evidence in isolated, production-fidelity replicas.
 
+## Install and adopt
+
+Sandman is currently a CLI-first tool with a GitHub Actions integration. It is not yet a
+hosted GitHub App like Greptile. Install the pinned CLI with `uv`:
+
+```bash
+uv tool install \
+  "git+https://github.com/0x3ddie/sandman.git@d2af9cc183c41aaae250906ab29d6c7f203f0984"
+sandman --help
+```
+
+To adopt it in a repository:
+
+1. Commit a `.sandman.toml` containing the service startup contract and sanitized probes.
+2. Validate it with `sandman config` before enabling cloud execution.
+3. Add the Sandman GitHub Actions workflow and pin the CLI source to a reviewed commit.
+4. Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and optionally `OPENAI_API_KEY` as GitHub
+   Actions secrets.
+5. Trigger it from a deployment event, monitoring webhook, manual workflow, or trusted
+   `/sandman` pull-request comment.
+
+The CLI owns configuration, orchestration, and evidence. GitHub is the normal user interface;
+Modal provides ephemeral execution; Greptile reviews the verified draft PR. A future hosted
+GitHub App can automate installation and webhook setup without changing that underlying model.
+
 ## What is implemented
 
 - Parallel three-lane investigation orchestration
