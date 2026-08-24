@@ -886,6 +886,34 @@ class GitWorkspace:
         )
 
 
+#: Network failures worth retrying. A missing ref or a rejected credential is
+#: not here on purpose: retrying those only delays an inevitable failure.
+_TRANSIENT_GIT_ERRORS: tuple[str, ...] = (
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "connection timed out",
+    "connection reset by peer",
+    "operation timed out",
+    "ssl_error",
+    "tls packet",
+    "unable to access",
+    "the remote end hung up",
+    "early eof",
+    "rpc failed",
+    "server closed connection",
+    "502 bad gateway",
+    "503 service unavailable",
+)
+
+_FETCH_ATTEMPTS = 3
+_FETCH_BACKOFF_SECONDS = 1.5
+
+
+def _is_transient_git_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _TRANSIENT_GIT_ERRORS)
+
+
 @asynccontextmanager
 async def clone_workspace(
     repo_url: str,
@@ -920,23 +948,37 @@ async def clone_workspace(
         # Fetching the sha directly is exact but needs the server to allow it;
         # fetching the ref is universally supported but can race a moving branch,
         # which the post-checkout verification below catches.
-        for spec in (revision.sha, f"+{revision.ref}:{target}", f"+refs/heads/*:{target}/*"):
-            try:
-                await _git(
-                    "fetch",
-                    "--no-tags",
-                    *depth_args,
-                    "origin",
-                    spec,
-                    cwd=root,
-                    token=token,
-                    timeout_s=_CLONE_TIMEOUT_SECONDS,
-                )
-            except GitError as exc:
-                errors.append(str(exc))
-                continue
-            fetched = True
-            break
+        specs = (revision.sha, f"+{revision.ref}:{target}", f"+refs/heads/*:{target}/*")
+
+        for attempt in range(_FETCH_ATTEMPTS):
+            for spec in specs:
+                try:
+                    await _git(
+                        "fetch",
+                        "--no-tags",
+                        *depth_args,
+                        "origin",
+                        spec,
+                        cwd=root,
+                        token=token,
+                        timeout_s=_CLONE_TIMEOUT_SECONDS,
+                    )
+                except GitError as exc:
+                    errors.append(str(exc))
+                    continue
+                fetched = True
+                break
+
+            if fetched:
+                break
+
+            # Every spec failed. Retry only when the cause looks transient --
+            # a name-resolution or TLS blip abandons a hotfix that would have
+            # succeeded a second later, while a bad ref or a rejected
+            # credential will fail identically no matter how often it is tried.
+            if attempt == _FETCH_ATTEMPTS - 1 or not _is_transient_git_error(errors[-1]):
+                break
+            await asyncio.sleep(_FETCH_BACKOFF_SECONDS * (2**attempt))
 
         if not fetched:
             raise GitError(

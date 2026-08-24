@@ -293,3 +293,49 @@ class TestConfigFanOutAccounting:
                 repository_url="https://github.com/o/r",
                 probes=[{"id": "a", "preset": "x", "module": "y"}],
             )
+
+
+class TestTransientGitFailuresAreRetried:
+    """A network blip must not abandon a hotfix.
+
+    A real run lost seven of eight hotfix attempts to a single DNS failure
+    ("Could not resolve host: github.com") because the fetch had no retry at
+    all. Retrying is only correct for transient causes: a missing ref or a
+    rejected credential fails identically however often it is tried, and
+    retrying those just delays the report.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com",
+            "fatal: unable to access: Connection timed out",
+            "error: RPC failed; curl 56 Recv failure: Connection reset by peer",
+            "fatal: the remote end hung up unexpectedly",
+            "fatal: early EOF",
+            "The requested URL returned error: 503 Service Unavailable",
+        ],
+    )
+    def test_network_failures_are_transient(self, message: str) -> None:
+        from sandman.github import _is_transient_git_error
+
+        assert _is_transient_git_error(message) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "fatal: couldn't find remote ref refs/heads/nope",
+            "remote: Invalid credentials",
+            "fatal: repository 'https://github.com/o/r/' not found",
+            "error: pathspec 'deadbeef' did not match any file(s) known to git",
+        ],
+    )
+    def test_permanent_failures_are_not_retried(self, message: str) -> None:
+        from sandman.github import _is_transient_git_error
+
+        assert _is_transient_git_error(message) is False
+
+    def test_retry_count_is_bounded(self) -> None:
+        from sandman.github import _FETCH_ATTEMPTS
+
+        assert 1 < _FETCH_ATTEMPTS <= 5
