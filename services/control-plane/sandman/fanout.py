@@ -146,7 +146,8 @@ class FanOutEngine:
         replica count, so asking for 200 replicas on a 25-slot budget queues
         rather than failing.
         """
-        if plan.image is None:
+        image = plan.image
+        if image is None:
             raise FanOutError(f"variant {plan.variant.value} was never prepared")
 
         cfg = plan.config
@@ -179,7 +180,7 @@ class FanOutEngine:
                         )
                     )
                     handle = await self._factory.spawn(
-                        plan.image, cfg, plan.variant, region=region, unit_index=index
+                        image, cfg, plan.variant, region=region, unit_index=index
                     )
                     await self._factory.wait_ready(handle, cfg, timeout_s=cfg.timeout_seconds)
                     url = await self._factory.tunnel_url(handle, cfg.port)

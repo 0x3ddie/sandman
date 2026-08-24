@@ -18,7 +18,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -26,6 +26,9 @@ from rich.table import Table
 
 from .config import ProjectConfig, get_settings
 from .models import Classification, Variant
+
+if TYPE_CHECKING:
+    from .orchestrator import RunOutcome
 
 app = typer.Typer(
     name="sandman",
@@ -178,7 +181,7 @@ def investigate(
     raise typer.Exit(EXIT_OK)
 
 
-def _render(outcome) -> None:
+def _render(outcome: RunOutcome) -> None:
     console.print()
     console.rule(f"[bold]{outcome.run_id}[/bold]  ·  {outcome.state.value}")
 
