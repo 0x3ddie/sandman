@@ -61,5 +61,6 @@ pythonpath = ["services/control-plane", "packages/sdk", "packages/probes", "targ
 [tool.mypy]
 python_version = "3.11"
 strict = true
+plugins = ["pydantic.mypy"]
 mypy_path = "services/control-plane:packages/sdk:packages/probes"
 ignore_missing_imports = true

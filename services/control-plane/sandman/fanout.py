@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 
 import httpx
@@ -151,7 +151,7 @@ class FanOutEngine:
 
         cfg = plan.config
         replicas = ReplicaSet(variant=plan.variant)
-        regions = cfg.regions or [None]  # type: ignore[list-item]
+        regions: list[str | None] = list(cfg.regions) if cfg.regions else [None]
 
         async def one(index: int) -> None:
             region = regions[index % len(regions)]
@@ -226,7 +226,7 @@ class FanOutEngine:
         self,
         variant: Variant,
         replicas: ReplicaSet,
-        probes: Sequence[object],
+        probes: Sequence[ProbeDefinition],
     ) -> list[ProbeResult]:
         """Execute every probe across the lane's replicas."""
         if not replicas.healthy:
@@ -235,7 +235,7 @@ class FanOutEngine:
             # which the verdict engine refuses to classify.
             return [
                 _errored_result(
-                    probe_id=getattr(p, "id", str(p)),
+                    probe_id=p.id,
                     variant=variant,
                     message="; ".join(replicas.failures) or "no replica became ready",
                 )
@@ -248,7 +248,7 @@ class FanOutEngine:
         ) as client:
             tasks: list[asyncio.Task[ProbeResult]] = []
             for definition in probes:
-                fanout = int(getattr(definition, "fanout", 1) or 1)
+                fanout = max(1, definition.fanout)
                 for execution in range(fanout):
                     url = replicas.url_for(execution)
                     tasks.append(
@@ -273,22 +273,21 @@ class FanOutEngine:
 
     async def _execute(
         self,
-        definition: object,
+        definition: ProbeDefinition,
         variant: Variant,
         url: str,
         unit_index: int,
         replica_count: int,
         client: httpx.AsyncClient,
     ) -> ProbeResult:
-        probe_id = getattr(definition, "id", str(definition))
-        assert Target is not None and ProbeContext is not None
+        probe_id = definition.id
 
         target = Target(url, client=client)
         context = ProbeContext(
             probe_id=probe_id,
             unit_index=unit_index,
             replica_count=replica_count,
-            params=dict(getattr(definition, "params", {}) or {}),
+            params=dict(definition.params),
         )
 
         started = time.perf_counter()
@@ -297,7 +296,7 @@ class FanOutEngine:
         error: BaseException | None = None
 
         try:
-            await definition.run(target, context)  # type: ignore[attr-defined]
+            await definition.run(target, context)
             outcome = ProbeOutcome.PASS
         except ProbeFailure as exc:  # an assertion about the code under test
             outcome = ProbeOutcome.FAIL
@@ -338,7 +337,7 @@ class FanOutEngine:
     # -- whole-lane orchestration -----------------------------------------
 
     async def run_variant(
-        self, plan: VariantPlan, probes: Sequence[object]
+        self, plan: VariantPlan, probes: Sequence[ProbeDefinition]
     ) -> list[ProbeResult]:
         """Prepare, spawn, probe, and always tear down."""
         if plan.image is None:
@@ -352,7 +351,7 @@ class FanOutEngine:
             await self.release(replicas)
 
     async def run_all(
-        self, plans: Sequence[VariantPlan], probes: Sequence[object]
+        self, plans: Sequence[VariantPlan], probes: Sequence[ProbeDefinition]
     ) -> list[ProbeResult]:
         """Run every lane concurrently.
 
@@ -372,7 +371,7 @@ class FanOutEngine:
                 raise settled
             results.extend(
                 _errored_result(
-                    probe_id=getattr(p, "id", str(p)),
+                    probe_id=p.id,
                     variant=plan.variant,
                     message=f"lane failed: {settled}",
                 )
@@ -387,7 +386,7 @@ class FanOutEngine:
 
 
 def _signature_from(
-    target: object,
+    target: Target,
     outcome: ProbeOutcome,
     error: BaseException | None,
     elapsed_ms: float,
@@ -397,17 +396,17 @@ def _signature_from(
     The last response a probe made is what its assertions were about, so it is
     the observation that characterises the behaviour.
     """
-    observations = list(getattr(target, "observations", []) or [])
+    observations = list(target.observations)
     if not observations:
         return BehavioralSignature.from_observation(
             error=error, latency_ms=elapsed_ms if outcome is not ProbeOutcome.ERROR else None
         )
     last = observations[-1]
     return BehavioralSignature.from_observation(
-        status_code=getattr(last, "status_code", None),
-        body=last.json() if hasattr(last, "json") else None,
+        status_code=last.status_code,
+        body=last.json(),
         error=error,
-        latency_ms=getattr(last, "elapsed_ms", elapsed_ms),
+        latency_ms=last.elapsed_ms,
     )
 
 
@@ -467,7 +466,7 @@ async def engine_for(
     budget: BudgetTracker,
     bus: RunEventBus,
     repo_url: str,
-):
+) -> AsyncGenerator[FanOutEngine, None]:
     """Engine bound to a run, guaranteeing the bus closes."""
     engine = FanOutEngine(factory=factory, budget=budget, bus=bus, repo_url=repo_url)
     try:

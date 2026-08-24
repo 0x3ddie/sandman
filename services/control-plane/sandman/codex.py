@@ -768,7 +768,7 @@ class CodexRunner:
         workdir: Path,
         env: dict[str, str],
         timeout_s: int,
-        key: str,
+        key: str | None,
     ) -> _ProcessOutput:
         try:
             proc = await asyncio.create_subprocess_exec(

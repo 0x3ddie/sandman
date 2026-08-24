@@ -84,13 +84,13 @@ class BudgetTracker:
 
     @property
     def remaining_usd(self) -> float:
-        return max(0.0, self.caps.max_usd_per_run - self.ledger.usd_spent)
+        return max(0.0, float(self.caps.max_usd_per_run) - float(self.ledger.usd_spent))
 
     @property
     def utilisation(self) -> float:
         if self.caps.max_usd_per_run <= 0:
             return 0.0
-        return min(1.0, self.ledger.usd_spent / self.caps.max_usd_per_run)
+        return min(1.0, float(self.ledger.usd_spent) / float(self.caps.max_usd_per_run))
 
     def _check_locked(self) -> None:
         """Caller must hold the lock."""
@@ -145,7 +145,9 @@ class BudgetTracker:
         Used to refuse a fan-out *before* provisioning rather than aborting
         halfway through and paying for sandboxes that produced nothing.
         """
-        return (self.ledger.usd_spent + projected_usd) > self.caps.max_usd_per_run
+        return bool(
+            float(self.ledger.usd_spent) + projected_usd > float(self.caps.max_usd_per_run)
+        )
 
     # -- concurrency gates -------------------------------------------------
 

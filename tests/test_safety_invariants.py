@@ -13,9 +13,9 @@ explicit test rather than relying on a code comment.
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from sandman.codex import PatchRejected, validate_patch
 from sandman.config import ProjectConfig, PromotionPolicy, VariantConfig
@@ -170,7 +170,7 @@ class TestInvariant2RevisionsArePinned:
 
     def test_revision_is_immutable(self) -> None:
         rev = Revision.parse("main@" + "a" * 40)
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             rev.sha = "b" * 40  # type: ignore[misc]
 
 
