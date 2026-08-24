@@ -1,3 +1,4 @@
+import * as React from "react"
 import type { IconProps } from "phosphor-react"
 
 import { cn } from "@/lib/utils"

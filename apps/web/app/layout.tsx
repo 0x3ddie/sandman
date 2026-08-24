@@ -1,3 +1,4 @@
+import * as React from "react"
 import type { Metadata } from "next"
 import { Geist_Mono, Instrument_Sans, Instrument_Serif } from "next/font/google"
 import { Toaster } from "sonner"
@@ -43,7 +44,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           position="bottom-left"
           theme="dark"
           offset={20}
-          gap={8}
           visibleToasts={4}
           toastOptions={{
             style: {
