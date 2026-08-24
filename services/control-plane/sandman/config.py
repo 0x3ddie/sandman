@@ -135,7 +135,7 @@ class Settings(BaseSettings):
             # Satisfied by either path. GITHUB_TOKEN is named here because it
             # is the single variable that unblocks a run; a GitHub App is the
             # better credential and is documented in SETUP.md.
-            "github": {"GITHUB_TOKEN": self.github_app_id and self.github_private_key_pem()
+            "github": {"GITHUB_TOKEN": (self.github_app_id and self.github_private_key_pem())
                        or self.github_token},
             "stripe": {
                 "STRIPE_SECRET_KEY": self.stripe_secret_key,
