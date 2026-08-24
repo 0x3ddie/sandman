@@ -464,11 +464,9 @@ class SandboxFactory:
     ) -> SandboxHandle:
         """Start one fan-out unit from a snapshot image."""
         client, app = await self._connect()
-        base = (
-            await modal.Image.from_id.aio(image, client=client)
-            if isinstance(image, str)
-            else image
-        )
+        # from_id performs no IO, so the sync form is correct in async code and
+        # the .aio variant is deprecated.
+        base = modal.Image.from_id(image, client=client) if isinstance(image, str) else image
 
         handle = SandboxHandle(
             sandbox_id="",
