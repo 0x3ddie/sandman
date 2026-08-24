@@ -14,7 +14,7 @@ hosted GitHub App like Greptile. Install the pinned CLI with `uv`:
 
 ```bash
 uv tool install \
-  "git+https://github.com/0x3ddie/sandman.git@d2af9cc183c41aaae250906ab29d6c7f203f0984"
+  "git+https://github.com/0x3ddie/sandman.git@1395ec10aa3c2efa74f42bbda81c66fadbff2f62"
 sandman --help
 ```
 
