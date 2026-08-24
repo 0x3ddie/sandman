@@ -126,9 +126,19 @@ class RunEventBus:
                 await self._rollup_task
             self._rollup_task = None
         await self._flush_rollup()
-        # Wake every subscriber so their generators can exit.
+        # Wake every subscriber so their generators can exit. A subscriber that
+        # is already backed up cannot accept the sentinel, and shutdown must not
+        # depend on it: drain one slot and retry, then give up. Its generator
+        # still exits on the next read because _closed is already set.
+        sentinel = Event(type=EventType.HEARTBEAT, data={"closed": True}, run_id=self.run_id)
         for queue in list(self._subscribers):
-            queue.put_nowait(Event(type=EventType.HEARTBEAT, data={"closed": True}, run_id=self.run_id))
+            try:
+                queue.put_nowait(sentinel)
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(sentinel)
 
     # -- publishing -------------------------------------------------------
 
