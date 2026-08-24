@@ -1,0 +1,133 @@
+# sandman project configuration.
+#
+# This file describes one repository under investigation: which branches define
+# the rollout, how each of the three sandbox variants is built, which probes run,
+# and what the run is allowed to cost.
+
+version = 1
+repository_url = "https://github.com/0x3ddie/sandman"
+lkg_branch = "demo/lkg"
+hotfix_branch_prefix = "sandman/hotfix"
+
+# Left unset, the baseline lane resolves to the second-newest merge on the LKG
+# branch. Pin it when you want the comparison held against a specific rollout.
+previous_lkg = ""
+
+custom_probe_paths = []
+
+# ---------------------------------------------------------------------------
+# Variants
+#
+# All three run the same image and command; only the revision differs. That is
+# the point -- any behavioural difference is attributable to the code, not to
+# how the sandbox was built.
+# ---------------------------------------------------------------------------
+
+[variants.baseline]
+image = "python:3.12-slim"
+setup_commands = ["pip install --no-cache-dir fastapi uvicorn"]
+startup_command = ["python", "target-app/main.py"]
+port = 8000
+health_path = "/health"
+replicas = 3
+cpu = 1.0
+memory_mb = 1024
+# Explicit, always: Modal's default sandbox timeout is 5 minutes and a longer
+# probe would be killed with no diagnostic.
+timeout_seconds = 600
+
+[variants.initial]
+image = "python:3.12-slim"
+setup_commands = ["pip install --no-cache-dir fastapi uvicorn"]
+startup_command = ["python", "target-app/main.py"]
+port = 8000
+health_path = "/health"
+replicas = 3
+cpu = 1.0
+memory_mb = 1024
+timeout_seconds = 600
+
+[variants.hotfix]
+image = "python:3.12-slim"
+setup_commands = ["pip install --no-cache-dir fastapi uvicorn"]
+startup_command = ["python", "target-app/main.py"]
+port = 8000
+health_path = "/health"
+replicas = 3
+cpu = 1.0
+memory_mb = 1024
+timeout_seconds = 600
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+
+[probes.catalog-fuzz]
+preset = "api-fuzz-differential"
+fanout = 4
+timeout_seconds = 120
+
+[probes.catalog-fuzz.params]
+endpoints = ["/api/catalog/search", "/api/catalog/facets", "/api/catalog/stats"]
+param = "q"
+pagination = true
+
+[probes.catalog-load]
+preset = "load-chaos-fanout"
+fanout = 2
+timeout_seconds = 180
+
+[probes.catalog-load.params]
+endpoints = ["/api/catalog/facets", "/api/catalog/search"]
+burst = 20
+concurrency = 10
+health_path = "/health"
+
+[probes.catalog-security]
+preset = "security-probe-suite"
+fanout = 2
+timeout_seconds = 120
+
+[probes.catalog-security.params]
+endpoints = ["/api/catalog/search", "/api/catalog/stats"]
+param = "q"
+
+[probes.catalog-slo]
+preset = "latency-slo-guard"
+fanout = 2
+timeout_seconds = 180
+
+[probes.catalog-slo.params]
+endpoints = ["/api/catalog/stats", "/api/catalog/search"]
+samples = 20
+concurrency = 4
+p95_ms = 750
+min_success_rate = 0.99
+
+# ---------------------------------------------------------------------------
+# Budget
+#
+# Two independent ceilings: Modal's container quota and OpenAI's org-level rate
+# bucket, which every sandbox shares through one key.
+# ---------------------------------------------------------------------------
+
+[budget]
+max_concurrent_sandboxes = 25
+max_concurrent_llm = 8
+max_usd_per_run = 5.0
+max_wall_clock_seconds = 3600
+on_exceed = "hard_stop"
+
+# ---------------------------------------------------------------------------
+# Promotion
+# ---------------------------------------------------------------------------
+
+[promotion]
+require_greptile_approval = true
+require_reprobe = true
+block_on_regression = true
+block_on_new_findings = true
+# The gate opens automatically only if you say so; by default a human turns the
+# key on the final merge into LKG.
+auto_promote = false
+max_patch_lines = 400
