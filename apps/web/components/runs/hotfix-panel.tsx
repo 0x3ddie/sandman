@@ -13,7 +13,7 @@
 
 import * as React from "react"
 
-import { cn, formatRelativeTime, shortSha } from "@/lib/utils"
+import { cn, shortSha } from "@/lib/utils"
 import type { HotfixDetail } from "@/lib/control-plane"
 import { CLASSIFICATION_META, isClassification } from "@/lib/variants"
 
@@ -183,11 +183,9 @@ export interface HotfixPanelProps {
   /** Empty when the gate is open. Computed once on the server. */
   blockers: PromotionBlocker[]
   safeToPromote: boolean
-  /** Wall-clock the run finished, for the relative timestamp on merges. */
-  finishedAt?: string | null
 }
 
-export function HotfixPanel({ hotfixes, blockers, safeToPromote, finishedAt }: HotfixPanelProps) {
+export function HotfixPanel({ hotfixes, blockers, safeToPromote }: HotfixPanelProps) {
   if (hotfixes.length === 0) {
     return (
       <section className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-4 py-10 text-center shadow-[var(--elev-1)]">
@@ -349,7 +347,6 @@ export function HotfixPanel({ hotfixes, blockers, safeToPromote, finishedAt }: H
               {hotfix.mergedSha ? (
                 <span className="mono text-[12px] text-[var(--fg-tertiary)]">
                   merged {shortSha(hotfix.mergedSha)}
-                  {finishedAt ? ` · ${formatRelativeTime(finishedAt)}` : ""}
                 </span>
               ) : null}
             </div>

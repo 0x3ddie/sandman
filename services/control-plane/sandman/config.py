@@ -48,7 +48,14 @@ class Settings(BaseSettings):
     # Greptile
     greptile_api_key: str | None = None
 
-    # GitHub App
+    # GitHub
+    #
+    # An App is the right answer: its installation tokens are repo-scoped,
+    # expire in an hour, are revocable by an org admin, and attribute commits to
+    # sandman[bot]. GITHUB_TOKEN is a fallback for running against a repository
+    # you already have push rights to -- it cannot be narrowed per call and
+    # carries its owner's access everywhere they can reach.
+    github_token: str | None = None
     github_app_id: str | None = None
     github_app_client_id: str | None = None
     github_app_client_secret: str | None = None
@@ -93,6 +100,15 @@ class Settings(BaseSettings):
         """Codex reads its own variable but falls back to the OpenAI key."""
         return self.codex_api_key or self.openai_api_key
 
+    @property
+    def github_auth_mode(self) -> str:
+        """Which GitHub credential the control plane will use."""
+        if self.github_app_id and self.github_private_key_pem():
+            return "app"
+        if self.github_token:
+            return "token"
+        return "none"
+
     def github_private_key_pem(self) -> str | None:
         """Return the App private key, from the inline var or the file path."""
         if self.github_app_private_key:
@@ -116,10 +132,11 @@ class Settings(BaseSettings):
             },
             "codex": {"OPENAI_API_KEY": self.codex_key},
             "greptile": {"GREPTILE_API_KEY": self.greptile_api_key},
-            "github": {
-                "GITHUB_APP_ID": self.github_app_id,
-                "GITHUB_APP_PRIVATE_KEY": self.github_private_key_pem(),
-            },
+            # Satisfied by either path. GITHUB_TOKEN is named here because it
+            # is the single variable that unblocks a run; a GitHub App is the
+            # better credential and is documented in SETUP.md.
+            "github": {"GITHUB_TOKEN": self.github_app_id and self.github_private_key_pem()
+                       or self.github_token},
             "stripe": {
                 "STRIPE_SECRET_KEY": self.stripe_secret_key,
                 "STRIPE_WEBHOOK_SECRET": self.stripe_webhook_secret,

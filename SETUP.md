@@ -29,12 +29,29 @@ cd apps/web && npx drizzle-kit push --force
 `docker-compose.yml` is the alternative if you would rather run Postgres in Docker; it maps 5433 so
 the two cannot collide. Point `DATABASE_URL` at whichever you use.
 
-## 3. The GitHub App — the one step only you can do
+## 3. GitHub
 
-sandman pushes hotfix branches and opens pull requests. That requires a GitHub App, not a personal
-token: an installation token is scoped to the installation, expires in an hour, is revocable by an
-org admin, and attributes commits to `sandman[bot]` rather than to whoever happened to sign up. A
-personal token carries that human's entire blast radius across every repo they can reach.
+### The quick path: the token you already have
+
+If `gh` is authenticated with `repo` scope on the target repository, that is enough. sandman
+reads `GITHUB_TOKEN` and uses it directly:
+
+```bash
+echo "GITHUB_TOKEN=$(gh auth token)" >> .env
+uv run sandman check          # the github row turns "ready"
+uv run python scripts/live_github_check.py   # proves clone -> push -> PR -> merge
+```
+
+This is already configured on this machine and verified end to end.
+
+### The better path: a GitHub App
+
+A personal token works, but it is the weaker credential: it cannot be narrowed per call, does not
+expire on its own, carries its owner's access to every repository they can reach, and attributes
+hotfix commits to a person. An App installation token is scoped to one installation, expires in an
+hour, is revocable by an org admin, and commits as `sandman[bot]`.
+
+Worth doing before pointing sandman at anything you care about. Not required to run it.
 
 1. Go to <https://github.com/settings/apps/new>.
 2. **GitHub App name**: anything unique, e.g. `sandman-probe`.
@@ -64,8 +81,10 @@ GITHUB_APP_PRIVATE_KEY_PATH=/absolute/path/to/the-downloaded-key.pem
 Confirm it took:
 
 ```bash
-uv run sandman check      # the github row should read "ready"
+uv run sandman check      # github: ready, and `github_auth_mode` becomes "app"
 ```
+
+When both are present the App wins; `GITHUB_TOKEN` is only the fallback.
 
 ## 4. Greptile
 

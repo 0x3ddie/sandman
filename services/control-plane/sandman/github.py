@@ -410,6 +410,9 @@ class GitHubApp:
 
     # -- JWT ---------------------------------------------------------------
 
+    def _app_configured(self) -> bool:
+        return bool(self._settings.github_app_id and self._settings.github_private_key_pem())
+
     def app_jwt(self) -> str:
         """Sign a short-lived RS256 assertion for the App itself."""
         app_id = self._settings.github_app_id
@@ -468,7 +471,22 @@ class GitHubApp:
         that asked for ``pull_requests:write``, and -- more importantly -- a
         broadly scoped token must never be handed to a caller that deliberately
         asked to be narrowed.
+
+        When no App is configured but ``GITHUB_TOKEN`` is set, that token is used
+        instead. It is strictly worse -- a user token cannot be narrowed per
+        call, does not expire on its own, carries its owner's access to every
+        repository they can reach, and attributes commits to a person rather than
+        to ``sandman[bot]``. It exists so the loop can run against a repository
+        you already have push rights to without waiting on App setup.
         """
+        fallback = self._settings.github_token
+        if not self._app_configured() and fallback:
+            return InstallationToken(
+                token=fallback,
+                expires_at=datetime.now(UTC) + timedelta(days=365),
+                permissions={},
+            )
+
         key = (owner.lower(), repo.lower(), _permission_signature(permissions))
         async with self._lock:
             cached = self._tokens.get(key)
@@ -581,6 +599,26 @@ class GitHubClient(_GitHubHTTP):
             if "already exists" in _message_of(response).lower():
                 return
             raise _error_for("POST", f"/repos/{owner}/{repo}/git/refs", response)
+
+    async def delete_branch(self, owner: str, repo: str, branch: str) -> None:
+        """Delete ``refs/heads/{branch}``.
+
+        Idempotent: a branch that is already gone is the desired end state, so a
+        404 is success. Refuses to touch anything outside the sandman namespace
+        -- cleanup code should never be able to delete a real branch.
+        """
+        _check_branch(branch)
+        if not branch.startswith("sandman/"):
+            raise GitHubError(
+                f"refusing to delete {branch!r}: only sandman/* branches may be removed"
+            )
+        response = await self._request(
+            "DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{branch}", allow=(404, 422)
+        )
+        if response.status_code not in (204, 404, 422):
+            raise _error_for(
+                "DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{branch}", response
+            )
 
     # -- pull requests -----------------------------------------------------
 

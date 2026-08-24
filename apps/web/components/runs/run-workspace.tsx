@@ -14,7 +14,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { Prohibit, SealCheck } from "phosphor-react"
+import { Prohibit, ShieldCheck } from "phosphor-react"
 import * as Tooltip from "@radix-ui/react-tooltip"
 
 import { cn, formatDuration, formatUsd, revisionRef, shortSha } from "@/lib/utils"
@@ -305,7 +305,7 @@ export function RunWorkspace({
                       onClick={promote}
                       disabled={promotionBlocked || promoting}
                     >
-                      <SealCheck size={16} weight="regular" color="currentColor" aria-hidden />
+                      <ShieldCheck size={16} weight="regular" color="currentColor" aria-hidden />
                       {promoting ? "Promoting…" : "Promote to LKG"}
                     </Button>
                   </span>

@@ -301,17 +301,28 @@ export function SegmentedField<T extends string>({
   name,
   defaultValue,
   options,
+  onValueChange,
   "aria-label": ariaLabel,
 }: {
   name: string
   defaultValue: T
   options: readonly SegmentedOption<T>[]
+  /** Lets the caller react to the choice — hint text that explains it, usually. */
+  onValueChange?: (value: T) => void
   "aria-label": string
 }) {
   const [value, setValue] = React.useState<T>(defaultValue)
   return (
     <>
-      <Segmented value={value} onValueChange={setValue} options={options} aria-label={ariaLabel} />
+      <Segmented
+        value={value}
+        onValueChange={(next) => {
+          setValue(next)
+          onValueChange?.(next)
+        }}
+        options={options}
+        aria-label={ariaLabel}
+      />
       <input type="hidden" name={name} value={value} />
     </>
   )
