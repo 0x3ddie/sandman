@@ -73,9 +73,13 @@ export const account = pgTable(
       .references(() => user.id, { onDelete: "cascade" }),
     accountId: text("account_id").notNull(),
     providerId: text("provider_id").notNull(),
+    // better-auth >= 1.7 requires `issuer` on the account model; sign-up fails
+    // outright without it.
+    issuer: text("issuer"),
     accessToken: text("access_token"),
     refreshToken: text("refresh_token"),
     accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
     scope: text("scope"),
     idToken: text("id_token"),
     password: text("password"),

@@ -12,7 +12,6 @@ import { z } from "zod"
 import { activeOrganization, getSession } from "@/lib/auth"
 import { StripeNotConfiguredError, createCheckoutSession } from "@/lib/stripe"
 
-export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 const bodySchema = z.object({

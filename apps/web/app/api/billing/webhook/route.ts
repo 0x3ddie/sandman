@@ -25,7 +25,6 @@ import { db, schema } from "@/lib/db"
 import { PLANS, isPlanId, type PlanId } from "@/lib/plans"
 import { planForPriceId, stripeClient } from "@/lib/stripe"
 
-export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 export async function POST(request: Request): Promise<Response> {

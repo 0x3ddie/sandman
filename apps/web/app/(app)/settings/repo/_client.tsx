@@ -54,14 +54,25 @@ export function ConnectRepository({
   } | null
   disabled: boolean
 }) {
-  const [installationId, setInstallationId] = React.useState<number | null>(
-    connected?.installationId ?? installations[0]?.id ?? null,
-  )
-  const installation = installations.find((entry) => entry.id === installationId) ?? installations[0]
-  const [repository, setRepository] = React.useState<string>(
-    connected?.repositoryFullName ?? installation?.repositories[0]?.fullName ?? "",
-  )
+  const initialInstallation =
+    installations.find((entry) => entry.id === connected?.installationId) ?? installations[0]
 
+  const [installationId, setInstallationId] = React.useState<number | null>(
+    initialInstallation?.id ?? null,
+  )
+  const [repository, setRepository] = React.useState<string>(() => {
+    // Only pre-select the connected repository when it is actually one of this
+    // installation's — otherwise the select would show a value it has no option
+    // for, and submit an empty string.
+    const known = initialInstallation?.repositories.some(
+      (repo) => repo.fullName === connected?.repositoryFullName,
+    )
+    return known && connected
+      ? connected.repositoryFullName
+      : (initialInstallation?.repositories[0]?.fullName ?? "")
+  })
+
+  const installation = installations.find((entry) => entry.id === installationId) ?? installations[0]
   const options = installation?.repositories ?? []
   const selected = options.find((repo) => repo.fullName === repository) ?? options[0]
 

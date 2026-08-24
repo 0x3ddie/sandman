@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto"
 import { and, eq } from "drizzle-orm"
 import { z } from "zod"
 
+import { isOrganizationOwner } from "@/lib/auth"
 import type { ProbeSpec, ProjectConfig, VariantConfig, VariantKey } from "@/lib/control-plane"
 import { encryptSecret, secretsConfigured } from "@/lib/crypto"
 import { db, schema } from "@/lib/db"
@@ -770,6 +771,12 @@ export async function switchPlan(
   }
 
   const { organization, session, stripeSubscriptionId } = await organizationContext()
+
+  // The only action here that spends someone else's money, so it is the only
+  // one gated on a role rather than on membership alone.
+  if (!(await isOrganizationOwner(session.user.id, organization.id))) {
+    return failed("Only an owner or admin can change the plan.")
+  }
   if (!stripeSubscriptionId) {
     return failed("There is no active subscription to move; start a checkout instead.")
   }

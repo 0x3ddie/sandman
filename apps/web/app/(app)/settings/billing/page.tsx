@@ -8,8 +8,7 @@
  * rather than pretending the two are the same number.
  */
 
-import { PLANS } from "@/lib/plans"
-import { overageUsd } from "@/lib/plans"
+import { PLANS, overageUsd } from "@/lib/plans"
 import { stripeMissingEnv } from "@/lib/stripe"
 import { absoluteTime, formatRelativeTime, formatUsd } from "@/lib/utils"
 

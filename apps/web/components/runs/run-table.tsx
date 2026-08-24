@@ -9,6 +9,16 @@ import { toast } from "sonner"
 
 import { runStreamUrl } from "@/lib/control-plane"
 import {
+  RUN_FILTER_INPUT_ID,
+  RUN_RANGE_FILTERS,
+  RUN_RANGE_LABELS,
+  RUN_STATUS_FILTERS,
+  isRunRangeFilter,
+  isRunStatusFilter,
+  type RunRangeFilter,
+  type RunStatusFilter,
+} from "@/lib/run-filters"
+import {
   absoluteTime,
   cn,
   formatDuration,
@@ -348,7 +358,7 @@ export function RunTable({
   }, [selected])
 
   const ids = React.useMemo(() => rows.map((row) => row.id), [rows])
-  const idsKey = ids.join(" ")
+  const idsKey = ids.join("\u0000")
 
   // A filter can shrink the list out from under the cursor.
   React.useEffect(() => {
@@ -642,30 +652,7 @@ export function RunTable({
  * Filter bar
  * ------------------------------------------------------------------------ */
 
-/** Single filter bar per page, so the `/` target can be a constant. */
-export const RUN_FILTER_INPUT_ID = "sandman-run-filter"
-
-export const RUN_STATUS_FILTERS = ["all", "running", "failed", "mine"] as const
-export type RunStatusFilter = (typeof RUN_STATUS_FILTERS)[number]
-
-export const RUN_RANGE_FILTERS = ["24h", "7d", "30d", "90d", "all"] as const
-export type RunRangeFilter = (typeof RUN_RANGE_FILTERS)[number]
-
-export function isRunStatusFilter(value: string): value is RunStatusFilter {
-  return (RUN_STATUS_FILTERS as readonly string[]).includes(value)
-}
-
-export function isRunRangeFilter(value: string): value is RunRangeFilter {
-  return (RUN_RANGE_FILTERS as readonly string[]).includes(value)
-}
-
-const RANGE_LABELS: Record<RunRangeFilter, string> = {
-  "24h": "Last 24 hours",
-  "7d": "Last 7 days",
-  "30d": "Last 30 days",
-  "90d": "Last 90 days",
-  all: "All time",
-}
+const RANGE_LABELS = RUN_RANGE_LABELS
 
 const CONTROL_CLASS = cn(
   "h-8 rounded-[6px] border border-[var(--border-hairline)] bg-[var(--bg-raised)]",

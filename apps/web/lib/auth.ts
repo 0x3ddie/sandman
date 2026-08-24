@@ -33,12 +33,6 @@ import { PLANS } from "@/lib/plans"
  * Environment
  * ------------------------------------------------------------------------ */
 
-function requiredEnv(name: string, why: string): string {
-  const value = process.env[name]
-  if (!value) throw new Error(`${name} is not set, so ${why}.`)
-  return value
-}
-
 /**
  * Absolute origin better-auth builds its callback URL from. GitHub redirects
  * back to `${baseURL}/api/auth/callback/github`, so a wrong value here fails at
@@ -72,7 +66,15 @@ export const auth = betterAuth({
 
   // Everything here is GitHub-backed. There is no password to store, so there
   // is no password to leak.
-  emailAndPassword: { enabled: false },
+  //
+  // The one exception is local development: signing in requires a GitHub App,
+  // and there is no way to look at the dashboard before one exists. Setting
+  // SANDMAN_DEV_LOGIN=1 enables a password login so the app is browsable.
+  // Guarded on NODE_ENV as well as the flag, so it cannot be switched on in a
+  // production build by environment alone.
+  emailAndPassword: {
+    enabled: process.env.SANDMAN_DEV_LOGIN === "1" && process.env.NODE_ENV !== "production",
+  },
 
   socialProviders: {
     github: {
@@ -287,13 +289,11 @@ export async function isOrganizationOwner(
   return row?.role === "owner" || row?.role === "admin"
 }
 
-/** Names the variables an operator must set before login can work at all. */
-export function authConfigured(): boolean {
-  return Boolean(
-    process.env.BETTER_AUTH_SECRET &&
-      process.env.GITHUB_APP_CLIENT_ID &&
-      process.env.GITHUB_APP_CLIENT_SECRET,
-  )
+/** Variables that must be set before sign-in can work at all. Names only. */
+export function authMissingEnv(): string[] {
+  const missing: string[] = []
+  if (!process.env.BETTER_AUTH_SECRET) missing.push("BETTER_AUTH_SECRET")
+  if (!process.env.GITHUB_APP_CLIENT_ID) missing.push("GITHUB_APP_CLIENT_ID")
+  if (!process.env.GITHUB_APP_CLIENT_SECRET) missing.push("GITHUB_APP_CLIENT_SECRET")
+  return missing
 }
-
-export { requiredEnv }

@@ -10,8 +10,6 @@ import { toNextJsHandler } from "better-auth/next-js"
 
 import { auth } from "@/lib/auth"
 
-// node:crypto and postgres.js both rule out the edge runtime.
-export const runtime = "nodejs"
 // Auth responses set cookies and read headers; caching any of them would hand
 // one user another user's session.
 export const dynamic = "force-dynamic"

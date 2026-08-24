@@ -101,7 +101,7 @@ function ProbeSwitch({
       <HiddenValue name="probeId" value={probeId} />
       <HiddenValue name="preset" value={preset} />
       <input type="hidden" name="enabled" value={checked ? "true" : "false"} />
-      <SubmitFormRef formRef={formRef} />
+      <FormRefAnchor formRef={formRef} />
       <SwitchPrimitive.Root
         checked={checked}
         onCheckedChange={(next) => {
@@ -129,7 +129,7 @@ function ProbeSwitch({
 }
 
 /** Hands the enclosing <form> element back up, since ActionForm owns it. */
-function SubmitFormRef({ formRef }: { formRef: React.RefObject<HTMLFormElement | null> }) {
+function FormRefAnchor({ formRef }: { formRef: React.RefObject<HTMLFormElement | null> }) {
   const anchor = React.useRef<HTMLSpanElement>(null)
   React.useEffect(() => {
     formRef.current = anchor.current?.closest("form") ?? null

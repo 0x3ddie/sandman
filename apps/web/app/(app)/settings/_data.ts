@@ -22,11 +22,9 @@ import type {
   ProjectConfig,
   PromotionPolicy,
   VariantConfig,
-  VariantKey,
 } from "@/lib/control-plane"
 import { db, schema, type Organization, type Project, type UsageCounter } from "@/lib/db"
 import { PLANS, planFor, type Plan } from "@/lib/plans"
-import { VARIANT_ORDER } from "@/lib/variants"
 
 /* ---------------------------------------------------------------------------
  * Defaults — mirroring sandman.config in the control plane
@@ -347,13 +345,9 @@ export async function listSecrets(projectId: string): Promise<SecretSummary[]> {
  * Misc
  * ------------------------------------------------------------------------ */
 
-/** `owner/name` from any GitHub URL form we accept. */
+/** `owner/name` split, for the GitHub calls that take the two separately. */
 export function repoParts(fullName: string): { owner: string; repo: string } | null {
   const [owner, repo] = fullName.split("/")
   if (!owner || !repo) return null
   return { owner, repo }
 }
-
-/** B → I → H, always. Re-exported so pages do not each import lib/variants. */
-export { VARIANT_ORDER }
-export type { VariantKey }

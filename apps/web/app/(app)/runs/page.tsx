@@ -8,16 +8,14 @@ import { db, organization, run, session, type Run } from "@/lib/db"
 import { cn, revisionRef } from "@/lib/utils"
 import { RUN_STATE_META, isRunState, type RunState } from "@/lib/variants"
 import { Card } from "@/components/ui/card"
+import { RunFilterBar, RunTable, type RunRow } from "@/components/runs/run-table"
 import {
   RUN_FILTER_INPUT_ID,
-  RunFilterBar,
-  RunTable,
   isRunRangeFilter,
   isRunStatusFilter,
   type RunRangeFilter,
-  type RunRow,
   type RunStatusFilter,
-} from "@/components/runs/run-table"
+} from "@/lib/run-filters"
 
 /** Filters are read from the URL on every request; nothing here is cacheable. */
 export const dynamic = "force-dynamic"
