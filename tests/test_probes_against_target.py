@@ -231,3 +231,66 @@ class TestPercentile:
 
         with pytest.raises(ValueError):
             percentile([], 0.95)
+
+
+class TestProbesNeverReportError:
+    """An ERROR outcome is not evidence about the code under test.
+
+    The verdict engine refuses to classify a lane whose units all errored, so a
+    probe that raises instead of failing silently removes a probe from the
+    comparison. This caught a real defect: the pagination probe asserted that a
+    body carrying "items" held a list, which is false for an endpoint where
+    "items" is a count -- and it used a bare assert, so the mismatch surfaced as
+    an ERROR rather than a FAIL.
+    """
+
+    @pytest.mark.parametrize(
+        ("preset", "params"),
+        [
+            (
+                "api-fuzz-differential",
+                {
+                    "endpoints": ["/api/catalog/search", "/api/catalog/facets", "/api/catalog/stats"],
+                    "param": "q",
+                    "pagination": True,
+                },
+            ),
+            (
+                "security-probe-suite",
+                {"endpoints": ["/api/catalog/search", "/api/catalog/stats"], "param": "q"},
+            ),
+            (
+                "latency-slo-guard",
+                {"endpoints": ["/api/catalog/stats"], "samples": 6, "p95_ms": 10_000},
+            ),
+            (
+                "load-chaos-fanout",
+                {"endpoints": ["/api/catalog/stats"], "burst": 6, "concurrency": 3},
+            ),
+        ],
+    )
+    async def test_every_probe_passes_or_fails_but_never_errors(
+        self, preset: str, params: dict, client
+    ) -> None:
+        probes = build_preset(preset, "p", params)
+        assert probes
+        for probe in probes:
+            target = Target("http://target", client=client)
+            context = ProbeContext(probe_id=probe.id, unit_index=0, replica_count=1)
+            try:
+                await probe.run(target, context)
+            except ProbeFailure:
+                pass
+            except Exception as exc:
+                pytest.fail(
+                    f"{probe.id} raised {type(exc).__name__}: {exc}. Probes must express "
+                    "an assertion about the target as ProbeFailure; anything else is "
+                    "recorded as ERROR and removes the probe from the comparison."
+                )
+
+    def test_stats_endpoint_reports_items_as_a_count(self) -> None:
+        """The shape that exposed the bug, pinned so it stays exercised."""
+        from fastapi.testclient import TestClient
+
+        body = TestClient(app).get("/api/catalog/stats").json()
+        assert isinstance(body["items"], int)

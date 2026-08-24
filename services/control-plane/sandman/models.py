@@ -458,7 +458,28 @@ class ProbeVerdict(BaseModel):
 
     sample_size: dict[Variant, int] = Field(default_factory=dict)
     flake_suspected: bool = False
+
+    nondeterministic_lanes: list[Variant] = Field(default_factory=list)
+    """Lanes whose replicas disagreed with each other.
+
+    Replicas within a lane are clones of one snapshot running identical code, so
+    disagreement here is the service being unstable across processes rather than
+    a difference between revisions.
+    """
+
     detail: str | None = None
+
+    @property
+    def nondeterministic(self) -> bool:
+        return bool(self.nondeterministic_lanes)
+
+    @property
+    def nondeterminism_is_pre_existing(self) -> bool:
+        """Whether the instability predates this rollout.
+
+        Present on the baseline too means it is not what this cut broke.
+        """
+        return Variant.BASELINE in self.nondeterministic_lanes
 
     @model_validator(mode="after")
     def _consistency(self) -> Self:

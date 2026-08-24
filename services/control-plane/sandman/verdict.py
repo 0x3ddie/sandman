@@ -114,6 +114,24 @@ class LaneSummary:
         return self.signature_by_digest.get(digest)
 
     @property
+    def distinct_signatures(self) -> int:
+        return len(self.signatures)
+
+    @property
+    def nondeterministic(self) -> bool:
+        """Replicas of the *same* revision disagreed on what they returned.
+
+        Every replica in a lane is cloned from one filesystem snapshot and runs
+        identical code, so a difference here is not a difference between
+        revisions -- it is the service itself being unstable across processes.
+
+        This is the only place such a defect can be seen. A probe holds one
+        replica's URL, so from inside a probe the response looks perfectly
+        consistent; only the aggregate across replicas reveals it.
+        """
+        return self.executed > 1 and self.distinct_signatures > 1
+
+    @property
     def p95_latency_ms(self) -> float | None:
         if not self.latencies_ms:
             return None
@@ -213,6 +231,10 @@ def compare_probe(
         )
 
     behaviour_changed = _signatures_diverge(signatures)
+    nondeterministic_lanes = [
+        variant for variant, lane in sorted(lanes.items(), key=lambda kv: kv[0].order)
+        if lane.nondeterministic
+    ]
     flake_suspected = any(lane.flaky for lane in lanes.values()) or (
         classification is Classification.SELF_HEALED
     )
@@ -227,6 +249,7 @@ def compare_probe(
         behaviour_changed=behaviour_changed,
         sample_size=sample_size,
         flake_suspected=flake_suspected,
+        nondeterministic_lanes=nondeterministic_lanes,
         detail=_detail(lanes, classification),
     )
 
@@ -360,6 +383,8 @@ def build_findings(
     """
     findings: list[Finding] = []
     for verdict in sorted(verdicts, key=lambda v: v.classification.severity):
+        if verdict.nondeterministic:
+            findings.append(_nondeterminism_finding(run_id, verdict))
         if verdict.classification is Classification.STABLE and not include_stable:
             continue
 
@@ -398,6 +423,46 @@ def build_findings(
             )
         )
     return findings
+
+
+def _nondeterminism_finding(run_id: str, verdict: ProbeVerdict) -> Finding:
+    """A probe whose replicas disagreed with each other.
+
+    Classified by whether the baseline was unstable too: instability that
+    predates the cut is PRE_EXISTING and is reported without a hotfix, exactly
+    like any other pre-existing failure.
+    """
+    pre_existing = verdict.nondeterminism_is_pre_existing
+    lanes = ", ".join(v.value for v in verdict.nondeterministic_lanes)
+    return Finding(
+        id=f"fnd_{uuid.uuid4().hex[:12]}",
+        run_id=run_id,
+        probe_id=verdict.probe_id,
+        classification=(
+            Classification.PRE_EXISTING if pre_existing else Classification.STILL_BROKEN
+        ),
+        severity=Severity.MEDIUM if pre_existing else Severity.HIGH,
+        title=f"{verdict.probe_id} is not deterministic across replicas",
+        description=(
+            f"Replicas of the same revision returned different responses in lane(s) "
+            f"{lanes}. Every replica is cloned from one snapshot and runs identical "
+            "code, so this is the service being unstable across processes rather than "
+            "a difference between revisions. A probe cannot see this on its own -- it "
+            "holds one replica's URL, where the response looks perfectly consistent."
+            + (
+                " The previous rollout is unstable too, so this is not what this cut "
+                "broke and it will not be auto-patched."
+                if pre_existing
+                else " The previous rollout was stable, so this cut introduced it."
+            )
+        ),
+        variant_evidence={
+            v: f"{verdict.sample_size.get(v, 0)} replicas disagreed"
+            for v in verdict.nondeterministic_lanes
+        },
+        reproduction=verdict.detail,
+        previously_ignored=pre_existing,
+    )
 
 
 @dataclass(slots=True)

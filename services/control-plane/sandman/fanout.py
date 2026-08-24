@@ -12,8 +12,13 @@ container quota.
 
 *Probe executions* are HTTP requests against an already-running replica. They are
 nearly free, so a probe can fan out to a high count without provisioning
-anything new; executions are distributed round-robin across the variant's
-replicas so that a single slow replica does not dominate the sample.
+anything new.
+
+Every probe runs against *every* replica, then ``fanout`` times over. Probing
+only ``fanout`` replicas round-robin would leave the rest paid for and never
+touched, and would throw away the one signal that reveals a service returning
+different answers from different processes -- a probe holds a single replica's
+URL, so from inside it that instability is invisible.
 
 Every variant is built from a snapshot taken once per revision. Building the base
 sandbox is the slow part (clone, install, verify); after that, spawning replica
@@ -30,6 +35,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from sandman_sdk import ProbeContext, ProbeDefinition, ProbeFailure, Target
+
 from .budget import BudgetTracker, estimate_run_cost
 from .config import ProjectConfig, VariantConfig
 from .events import EventType, RunEventBus, SandboxSnapshot
@@ -43,15 +50,6 @@ from .models import (
     Variant,
 )
 from .sandboxes import SandboxError, SandboxFactory, SandboxHandle
-
-try:  # The SDK is a sibling package; probes are optional at import time.
-    from sandman_sdk import ProbeContext, ProbeDefinition, ProbeFailure, Target, registry
-except ImportError:  # pragma: no cover - exercised only in partial installs
-    ProbeDefinition = None  # type: ignore[assignment,misc]
-    ProbeFailure = AssertionError  # type: ignore[assignment,misc]
-    ProbeContext = None  # type: ignore[assignment,misc]
-    Target = None  # type: ignore[assignment,misc]
-    registry = None  # type: ignore[assignment]
 
 
 class FanOutError(RuntimeError):
@@ -249,13 +247,20 @@ class FanOutEngine:
         ) as client:
             tasks: list[asyncio.Task[ProbeResult]] = []
             for definition in probes:
-                fanout = max(1, definition.fanout)
-                for execution in range(fanout):
+                # Every probe runs against EVERY replica, then `fanout` times over.
+                # Round-robining `fanout` executions alone would leave replicas
+                # beyond the first unprobed whenever fanout < replica count --
+                # paying for them and, worse, discarding the only signal that
+                # reveals a service behaving differently between processes.
+                # This also matches ProjectConfig.total_fanout(), which has always
+                # accounted for replicas * fanout.
+                executions = len(replicas.urls) * max(1, definition.fanout)
+                for execution in range(executions):
                     url = replicas.url_for(execution)
                     tasks.append(
                         asyncio.create_task(
                             self._execute(
-                                definition, variant, url, execution, fanout, client
+                                definition, variant, url, execution, len(replicas.urls), client
                             )
                         )
                     )

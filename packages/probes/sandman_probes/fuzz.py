@@ -93,12 +93,19 @@ def build(probe_id: str, params: Mapping[str, Any]) -> list[ProbeDefinition]:
                 for case in PAGINATION_CASES:
                     response = await t.get(_ep, params=case)
                     expect(response).not_server_error()
-                    if response.ok:
-                        body = response.json()
-                        if isinstance(body, Mapping) and "items" in body:
-                            items = body.get("items")
-                            assert isinstance(items, list), "items must be a list"
-                            expect(response).json_contains({"limit": case["limit"]})
+                    if not response.ok:
+                        continue
+                    body = response.json()
+                    if not isinstance(body, Mapping):
+                        continue
+                    # Only assert the page contract against an endpoint that
+                    # actually paginates. A body carrying "items" as a count
+                    # rather than a list is simply a different endpoint, not a
+                    # defect -- and a bare assert here would record it as an
+                    # ERROR, which the verdict engine treats as no evidence at
+                    # all rather than as a failure.
+                    if isinstance(body.get("items"), list):
+                        expect(response).json_contains({"limit": case["limit"]})
 
             definitions.append(
                 ProbeDefinition(

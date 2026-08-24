@@ -227,3 +227,88 @@ class TestFindings:
     def test_counts(self) -> None:
         run = evaluate("run_1", lanes_for(True, False, True), require_hotfix=True)
         assert run.counts() == {"restored": 1}
+
+
+class TestNondeterminismAcrossReplicas:
+    """A probe cannot see this on its own.
+
+    Each probe holds one replica's URL, so a service that returns a different
+    shape per process looks perfectly consistent from inside the probe. Only the
+    aggregate across replicas of the same revision reveals it.
+    """
+
+    def _lane(self, variant: Variant, *, shapes: list[object]) -> list[ProbeResult]:
+        return [
+            result(variant, probe_id="facets", passed=True, body=shape, unit_index=i)
+            for i, shape in enumerate(shapes)
+        ]
+
+    def test_replicas_returning_different_shapes_is_flagged(self) -> None:
+        results = [
+            *self._lane(Variant.BASELINE, shapes=[{"a": 1}, {"a": 1}]),
+            *self._lane(Variant.INITIAL, shapes=[{"a": 1}, {"b": 2}]),
+        ]
+        grouped = summarize(results)
+        verdict = compare_probe("facets", grouped["facets"])
+        assert verdict.nondeterministic is True
+        assert Variant.INITIAL in verdict.nondeterministic_lanes
+        assert Variant.BASELINE not in verdict.nondeterministic_lanes
+
+    def test_agreeing_replicas_are_not_flagged(self) -> None:
+        results = [
+            *self._lane(Variant.BASELINE, shapes=[{"a": 1}, {"a": 1}]),
+            *self._lane(Variant.INITIAL, shapes=[{"a": 1}, {"a": 1}]),
+        ]
+        grouped = summarize(results)
+        verdict = compare_probe("facets", grouped["facets"])
+        assert verdict.nondeterministic is False
+
+    def test_a_single_replica_cannot_be_nondeterministic(self) -> None:
+        """One sample is never disagreement."""
+        results = [
+            *self._lane(Variant.BASELINE, shapes=[{"a": 1}]),
+            *self._lane(Variant.INITIAL, shapes=[{"b": 2}]),
+        ]
+        grouped = summarize(results)
+        verdict = compare_probe("facets", grouped["facets"])
+        assert verdict.nondeterministic is False
+
+    def test_instability_on_the_baseline_is_pre_existing(self) -> None:
+        results = [
+            *self._lane(Variant.BASELINE, shapes=[{"a": 1}, {"b": 2}]),
+            *self._lane(Variant.INITIAL, shapes=[{"a": 1}, {"b": 2}]),
+        ]
+        grouped = summarize(results)
+        verdict = compare_probe("facets", grouped["facets"])
+        assert verdict.nondeterminism_is_pre_existing is True
+
+        run = evaluate("run_1", results)
+        finding = next(f for f in run.findings if "deterministic" in f.title)
+        assert finding.classification is Classification.PRE_EXISTING
+        assert finding.previously_ignored is True
+        # Not this rollout's fault, so it must not be auto-patched.
+        assert finding not in run.hotfix_candidates
+
+    def test_instability_new_in_this_rollout_is_a_hotfix_candidate(self) -> None:
+        results = [
+            *self._lane(Variant.BASELINE, shapes=[{"a": 1}, {"a": 1}]),
+            *self._lane(Variant.INITIAL, shapes=[{"a": 1}, {"b": 2}]),
+        ]
+        grouped = summarize(results)
+        verdict = compare_probe("facets", grouped["facets"])
+        assert verdict.nondeterminism_is_pre_existing is False
+
+        run = evaluate("run_1", results)
+        finding = next(f for f in run.findings if "deterministic" in f.title)
+        assert finding.classification is Classification.STILL_BROKEN
+        assert finding in run.hotfix_candidates
+
+    def test_finding_is_emitted_even_when_every_lane_passed(self) -> None:
+        """Pass/fail hides this entirely; the finding is the only surface."""
+        results = [
+            *self._lane(Variant.BASELINE, shapes=[{"a": 1}, {"b": 2}]),
+            *self._lane(Variant.INITIAL, shapes=[{"a": 1}, {"b": 2}]),
+        ]
+        run = evaluate("run_1", results)
+        assert all(v.classification is Classification.STABLE for v in run.verdicts)
+        assert any("deterministic" in f.title for f in run.findings)
