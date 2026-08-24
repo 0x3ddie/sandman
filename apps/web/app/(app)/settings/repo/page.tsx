@@ -9,7 +9,9 @@ import {
   appInstallUrl,
   githubConfigured,
   githubMissingEnv,
+  githubAuthMode,
   listAppInstallations,
+  listTokenRepositories,
   listBranches,
   listInstallationRepositories,
 } from "@/lib/github"
@@ -34,26 +36,49 @@ async function loadGitHub(
   if (!githubConfigured()) return { installations: [], branches: [], error: null }
 
   try {
-    // Capped: an App installed on dozens of accounts would otherwise make this
-    // page wait on dozens of sequential round trips.
-    const installations = (await listAppInstallations()).filter((entry) => !entry.suspended).slice(0, 8)
+    let options: InstallationOption[]
 
-    const options: InstallationOption[] = await Promise.all(
-      installations.map(async (installation) => ({
-        id: installation.id,
-        login: installation.accountLogin,
-        accountType: installation.accountType,
-        repositories: (await listInstallationRepositories(installation.id)).map((repo) => ({
-          fullName: repo.fullName,
-          defaultBranch: repo.defaultBranch,
-          private: repo.private,
+    if (githubAuthMode() === "token") {
+      // A plain token has no installations. Present the repositories it can
+      // push to as a single pseudo-installation so the picker is identical in
+      // both modes; id 0 is the sentinel repoToken() recognises.
+      options = [
+        {
+          id: 0,
+          login: "Your repositories",
+          accountType: "Token",
+          repositories: (await listTokenRepositories()).map((repo) => ({
+            fullName: repo.fullName,
+            defaultBranch: repo.defaultBranch,
+            private: repo.private,
+          })),
+        },
+      ]
+    } else {
+      // Capped: an App installed on dozens of accounts would otherwise make
+      // this page wait on dozens of sequential round trips.
+      const installations = (await listAppInstallations())
+        .filter((entry) => !entry.suspended)
+        .slice(0, 8)
+
+      options = await Promise.all(
+        installations.map(async (installation) => ({
+          id: installation.id,
+          login: installation.accountLogin,
+          accountType: installation.accountType,
+          repositories: (await listInstallationRepositories(installation.id)).map((repo) => ({
+            fullName: repo.fullName,
+            defaultBranch: repo.defaultBranch,
+            private: repo.private,
+          })),
         })),
-      })),
-    )
+      )
+    }
 
     let branches: string[] = []
     const parts = repositoryFullName ? repoParts(repositoryFullName) : null
-    if (installationId && parts) {
+    // installationId is 0 in token mode, which is falsy but valid.
+    if (installationId !== null && parts) {
       branches = (await listBranches(installationId, parts.owner, parts.repo)).map((b) => b.name)
     }
 

@@ -4,10 +4,12 @@ import { and, desc, eq, gte, ilike, isNotNull, like, notInArray, or, sql } from 
 import type { SQL } from "drizzle-orm"
 
 import { ControlPlaneError, listRuns, type RunListEntry } from "@/lib/control-plane"
-import { db, organization, run, session, type Run } from "@/lib/db"
+import { activeOrganization, requireUser } from "@/lib/auth"
+import { db, project, run, type Run } from "@/lib/db"
 import { cn, revisionRef } from "@/lib/utils"
 import { RUN_STATE_META, isRunState, type RunState } from "@/lib/variants"
 import { Card } from "@/components/ui/card"
+import { StartProbeButton } from "./start-probe-button"
 import { RunFilterBar, RunTable, type RunRow } from "@/components/runs/run-table"
 import {
   RUN_FILTER_INPUT_ID,
@@ -45,25 +47,34 @@ const TERMINAL_STATES: string[] = ["completed", "failed", "aborted"]
  * yet, so the active workspace comes from the newest unexpired session row. The
  * user id it returns is what the "Mine" filter matches on.
  */
-async function resolveWorkspace(): Promise<{ organizationId: string; userId: string | null } | null> {
-  const [live] = await db
-    .select({ userId: session.userId, organizationId: session.activeOrganizationId })
-    .from(session)
-    .where(gte(session.expiresAt, new Date()))
-    .orderBy(desc(session.updatedAt))
+/**
+ * The organisation and project this request acts in.
+ *
+ * Derived from the caller's own session. An earlier version read the
+ * most-recently-updated session row in the database instead, which happens to
+ * work with a single user and shows one person another's runs the moment there
+ * are two.
+ */
+async function resolveWorkspace(): Promise<{
+  organizationId: string
+  userId: string | null
+  projectId: string | null
+} | null> {
+  const user = await requireUser()
+  const org = await activeOrganization()
+
+  const [firstProject] = await db
+    .select({ id: project.id })
+    .from(project)
+    .where(eq(project.organizationId, org.id))
+    .orderBy(project.createdAt)
     .limit(1)
 
-  if (live?.organizationId) {
-    return { organizationId: live.organizationId, userId: live.userId }
+  return {
+    organizationId: org.id,
+    userId: user.user.id,
+    projectId: firstProject?.id ?? null,
   }
-
-  const [org] = await db
-    .select({ id: organization.id })
-    .from(organization)
-    .orderBy(organization.createdAt)
-    .limit(1)
-
-  return org ? { organizationId: org.id, userId: live?.userId ?? null } : null
 }
 
 async function loadLiveRuns(): Promise<{
@@ -328,12 +339,19 @@ export default async function RunsPage({ searchParams }: { searchParams: SearchP
           <RunFilterBar branches={branches} />
         </React.Suspense>
 
-        <p className="text-caption shrink-0 text-[var(--fg-tertiary)]">
-          <span className="mono text-[var(--fg-secondary)]" data-numeric>
-            {runRows.length}
-          </span>
-          {runRows.length === ROW_LIMIT ? ` of the most recent ${ROW_LIMIT} runs` : " runs"}
-        </p>
+        <div className="flex shrink-0 items-center gap-3">
+          <p className="text-caption text-[var(--fg-tertiary)]">
+            <span className="mono text-[var(--fg-secondary)]" data-numeric>
+              {runRows.length}
+            </span>
+            {runRows.length === ROW_LIMIT ? ` of the most recent ${ROW_LIMIT} runs` : " runs"}
+          </p>
+          <StartProbeButton
+            projectId={workspace.projectId ?? null}
+            disabled={!workspace.projectId}
+            disabledReason="Connect a repository in Settings → Repo first."
+          />
+        </div>
       </div>
 
       <Card className="overflow-hidden">

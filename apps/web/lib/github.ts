@@ -86,15 +86,32 @@ function privateKeyPem(): string | null {
 }
 
 /** Environment variables that block GitHub access, by name and never by value. */
+/**
+ * Which GitHub credential is available.
+ *
+ * An App is the better one -- its tokens are repo-scoped, expire in an hour,
+ * are revocable, and commit as sandman[bot]. A plain GITHUB_TOKEN is accepted
+ * so the product is usable against a repository you already have push rights
+ * to, without waiting on App setup.
+ */
+export type GitHubAuthMode = "app" | "token" | "none"
+
+export function githubAuthMode(): GitHubAuthMode {
+  if (process.env.GITHUB_APP_ID && privateKeyPem()) return "app"
+  if (process.env.GITHUB_TOKEN) return "token"
+  return "none"
+}
+
 export function githubMissingEnv(): string[] {
-  const missing: string[] = []
-  if (!process.env.GITHUB_APP_ID) missing.push("GITHUB_APP_ID")
-  if (!privateKeyPem()) missing.push("GITHUB_APP_PRIVATE_KEY")
-  return missing
+  return githubAuthMode() === "none" ? ["GITHUB_TOKEN"] : []
 }
 
 export function githubConfigured(): boolean {
-  return githubMissingEnv().length === 0
+  return githubAuthMode() !== "none"
+}
+
+export function appConfigured(): boolean {
+  return githubAuthMode() === "app"
 }
 
 /**
@@ -340,7 +357,46 @@ function toRepository(raw: RepositoryPayload): GitHubRepository {
 }
 
 /** Every installation of this App. App-JWT authenticated, not installation. */
+/**
+ * The repositories a plain user token can push to.
+ *
+ * Filtered to `permissions.push`: sandman opens pull requests and merges them,
+ * so a repository it can only read is not a candidate and listing it would only
+ * produce a failure later.
+ */
+export async function listTokenRepositories(): Promise<GitHubRepository[]> {
+  const token = process.env.GITHUB_TOKEN
+  if (!token) return []
+
+  const perPage = 100
+  const maxPages = 5
+  const repositories: GitHubRepository[] = []
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const payload = await githubRequest<RepositoryPayload[]>("/user/repos", {
+      authorization: `Bearer ${token}`,
+      searchParams: {
+        per_page: String(perPage),
+        page: String(page),
+        affiliation: "owner,collaborator,organization_member",
+        sort: "pushed",
+      },
+    })
+    repositories.push(
+      ...payload
+        .filter((entry) => (entry as { permissions?: { push?: boolean } }).permissions?.push !== false)
+        .map(toRepository),
+    )
+    if (payload.length < perPage) break
+  }
+
+  return repositories.sort((a, b) => a.fullName.localeCompare(b.fullName))
+}
+
 export async function listAppInstallations(): Promise<GitHubInstallationSummary[]> {
+  // A plain token has no installations to enumerate.
+  if (githubAuthMode() !== "app") return []
+
   const payload = await githubRequest<
     Array<{
       id: number
@@ -372,6 +428,8 @@ export async function listAppInstallations(): Promise<GitHubInstallationSummary[
 export async function listInstallationRepositories(
   installationId: number,
 ): Promise<GitHubRepository[]> {
+  if (githubAuthMode() === "token") return listTokenRepositories()
+
   const perPage = 100
   const token = await installationToken(installationId)
   const repositories: GitHubRepository[] = []
@@ -395,6 +453,21 @@ export async function listInstallationRepositories(
 }
 
 /**
+ * A repository-scoped token for either auth mode.
+ *
+ * In App mode this mints a fresh installation token; with a plain token it is
+ * the token itself. Callers should not need to know which.
+ */
+async function repoToken(installationId: number): Promise<string> {
+  if (githubAuthMode() === "token") {
+    const token = process.env.GITHUB_TOKEN
+    if (!token) throw new Error("GITHUB_TOKEN is not set")
+    return token
+  }
+  return installationToken(installationId)
+}
+
+/**
  * A repository's branches.
  *
  * Capped at 500. The LKG branch and the hotfix prefix are both chosen from
@@ -408,7 +481,7 @@ export async function listBranches(
 ): Promise<GitHubBranch[]> {
   const perPage = 100
   const maxPages = 5
-  const token = await installationToken(installationId)
+  const token = await repoToken(installationId)
   const branches: GitHubBranch[] = []
 
   for (let page = 1; page <= maxPages; page += 1) {
@@ -438,7 +511,7 @@ export async function getRepository(
   owner: string,
   repo: string,
 ): Promise<GitHubRepository> {
-  const token = await installationToken(installationId)
+  const token = await repoToken(installationId)
   const payload = await githubRequest<RepositoryPayload>(
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
     { authorization: `Bearer ${token}` },
